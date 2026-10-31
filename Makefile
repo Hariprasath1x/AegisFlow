@@ -79,7 +79,7 @@ features-pit:
 > dvc repro features_pit
 
 parity:
-> $(M2_PATH) PARITY_REDIS_URL=redis://localhost:6379/15 pytest -q tests/m2/unit/test_m2_parity.py
+> $(M2_PATH) pytest -q tests/m2/unit/test_m2_parity.py
 
 test-m2:
 > $(M2_PATH) pytest -q tests/m2/unit tests/m2/api

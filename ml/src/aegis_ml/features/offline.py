@@ -478,3 +478,4 @@ def build_offline_features(
 # Standard aliases for compatibility
 compute_offline_features = build_offline_features
 build_features = build_offline_features
+build = build_offline_features
