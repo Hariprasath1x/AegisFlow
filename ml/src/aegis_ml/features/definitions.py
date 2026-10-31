@@ -321,3 +321,4 @@ def amount_minor(amount: Decimal | float | int | str) -> int:
             f"Amount {amount} contains fractional minor units (sub-cent precision)"
         )
     return int(scaled.to_integral_value())
+
