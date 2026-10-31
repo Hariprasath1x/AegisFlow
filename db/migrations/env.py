@@ -16,17 +16,18 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Resolve DATABASE_URL from environment or ingestion.config
-try:
-    from ingestion.config import DATABASE_URL
-except ImportError:
-    DATABASE_URL = os.getenv(
-        "DATABASE_URL",
-        "postgresql+psycopg://aegisflow:aegisflow@localhost:5432/aegisflow",
-    )
+# Resolve DATABASE_URL from environment or ingestion.config if not already explicitly set
+if not config.get_main_option("sqlalchemy.url"):
+    try:
+        from ingestion.config import DATABASE_URL
+    except ImportError:
+        DATABASE_URL = os.getenv(
+            "DATABASE_URL",
+            "postgresql+psycopg://aegisflow:aegisflow@localhost:5432/aegisflow",
+        )
 
-if DATABASE_URL:
-    config.set_main_option("sqlalchemy.url", DATABASE_URL)
+    if DATABASE_URL:
+        config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
