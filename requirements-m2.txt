@@ -1,0 +1,12 @@
+# AegisFlow M2 — Unified Development Requirements
+# Python Compatibility: Python 3.12 (Requires Python >=3.11, <3.13)
+#
+# Install instructions:
+#   python3.12 -m venv .venv-m2
+#   source .venv-m2/bin/activate
+#   pip install -r requirements-m2.txt
+
+-r services/ingestion/requirements.txt
+-r ml/requirements.txt
+-r tests/requirements.txt
+
