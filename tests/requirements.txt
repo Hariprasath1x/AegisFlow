@@ -1,0 +1,9 @@
+# AegisFlow M2 — Test Suite & Fixture Requirements
+# Python Compatibility: Python 3.12 (Requires Python >=3.11, <3.13)
+#
+# Install instructions:
+#   python -m pip install -r tests/requirements.txt
+
+pytest==8.3.4
+httpx==0.27.2
+fakeredis[lua]==2.26.1
