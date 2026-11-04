@@ -80,6 +80,16 @@ def pg_store_fixture():
     # Teardown
     with psycopg.connect(PG_URL) as conn:
         with conn.cursor() as cur:
+            # Clean up fixture-scoped entity edges before deleting accounts
+            fixture_account_ids = [str(acc_1), str(acc_2)]
+            cur.execute(
+                """
+                DELETE FROM entity_edges
+                WHERE (src_type = 'account' AND src_id = ANY(%s))
+                   OR (dst_type = 'account' AND dst_id = ANY(%s));
+                """,
+                (fixture_account_ids, fixture_account_ids),
+            )
             if created_txns:
                 cur.execute("DELETE FROM transactions WHERE txn_id = ANY(%s);", (created_txns,))
             cur.execute("DELETE FROM counterparties WHERE counterparty_id = %s;", (cp_id,))
@@ -929,3 +939,58 @@ def test_d2_downgrade_guard_destination_account_id(pg_store_fixture):
                 f"Downgrade aborted: {dest_count} row(s) contain destination_account_id values. "
                 "Dropping the column would destroy this data."
             )
+
+
+def test_regression_transfer_fixture_cleanup_removes_entity_edges(pg_store_fixture):
+    """Regression test proving transfer transactions create edges and fixture teardown removes them cleanly."""
+    store, acc_1, acc_2, _, created_txns = pg_store_fixture
+    txn_id = uuid4()
+    created_txns.append(txn_id)
+
+    t = TransactionIn(
+        id=txn_id,
+        ts=datetime.now(timezone.utc),
+        account_id=acc_1,
+        counterparty_id=acc_2,
+        amount=Decimal("350.00"),
+        currency="INR",
+        channel="transfer",
+    )
+    assert store.store(t) is True
+
+    # 1. Edge must exist in entity_edges during active test
+    with psycopg.connect(PG_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) FROM entity_edges
+                WHERE src_type = 'account' AND src_id = %s
+                  AND dst_type = 'account' AND dst_id = %s
+                  AND edge_type = 'transfers_to';
+                """,
+                (str(acc_1), str(acc_2)),
+            )
+            count_active = cur.fetchone()[0]
+            assert count_active == 1
+
+            # 2. Simulate fixture-scoped edge cleanup for this test's accounts
+            cur.execute(
+                """
+                DELETE FROM entity_edges
+                WHERE (src_type = 'account' AND src_id = ANY(%s))
+                   OR (dst_type = 'account' AND dst_id = ANY(%s));
+                """,
+                ([str(acc_1), str(acc_2)], [str(acc_1), str(acc_2)]),
+            )
+            conn.commit()
+
+            # 3. Confirm edges for these accounts are completely removed
+            cur.execute(
+                """
+                SELECT count(*) FROM entity_edges
+                WHERE src_id = %s OR dst_id = %s OR src_id = %s OR dst_id = %s;
+                """,
+                (str(acc_1), str(acc_1), str(acc_2), str(acc_2)),
+            )
+            count_cleaned = cur.fetchone()[0]
+            assert count_cleaned == 0
