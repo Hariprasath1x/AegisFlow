@@ -983,4 +983,3 @@ def test_admin_database_safety_guards():
             "postgresql://user:pass@localhost:5432/somedb",
             mock_conn,
         )
-
