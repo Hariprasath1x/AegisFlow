@@ -91,10 +91,10 @@ def isolated_test_db():
     with psycopg.connect(test_db_url, autocommit=True) as init_conn:
         init_conn.execute(m1_sql)
 
-    # Upgrade to head (m2_0002)
+    # Upgrade to m2_0002
     cfg = Config(ALEMBIC_INI_PATH)
     cfg.set_main_option("sqlalchemy.url", alembic_db_url)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "m2_0002")
 
     # Connect to disposable DB for test usage
     test_conn = psycopg.connect(test_db_url, row_factory=dict_row)
