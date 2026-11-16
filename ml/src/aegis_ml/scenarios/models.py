@@ -111,6 +111,10 @@ class SyntheticTransaction(BaseModel):
             raise ValueError("merchant_id must be None in Phase 2")
         if self.ip_id is not None:
             raise ValueError("ip_id must be None in Phase 2")
+        if self.channel == "transfer" and self.destination_account_id is None:
+            raise ValueError("channel='transfer' requires destination_account_id to be non-null")
+        if self.channel != "transfer" and self.destination_account_id is not None:
+            raise ValueError(f"channel={self.channel!r} requires destination_account_id to be null")
         return self
 
 

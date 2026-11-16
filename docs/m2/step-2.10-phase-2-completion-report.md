@@ -20,11 +20,11 @@ The objective of Phase 2 was to implement a fully deterministic, in-memory synth
 - **Domain Modeling & Referential Validation:** High-fidelity Pydantic v2 schemas defining synthetic accounts, transactions, incident-bounded labels, evidence provenance, scenarios, and complete cross-scenario referential manifests.
 - **Deterministic Multi-Pattern Generators:** Six distinct scenario generators covering money mules, account takeover, synthetic identity, card-not-present fraud, sub-threshold structuring, and legitimate clean controls.
 - **Reproducible RNG Architecture:** Hierarchical sub-stream derivation using NumPy `SeedSequence.spawn()` anchored to canonical seed `20261010`, ensuring stream independence and execution order invariance.
-- **Cryptographic Serialization & Hashing:** Canonical JSON encoding with sorted keys, compact separators, strict UTC ISO-8601 formatting with `Z` suffixes, and deterministic SHA-256 digest computation (`551ac3b14190667005cabf160c28ce28d42b42fe1cd5fda8f1ead0277afcbe13`).
+- **Cryptographic Serialization & Hashing:** Canonical JSON encoding with sorted keys, compact separators, strict UTC ISO-8601 formatting with `Z` suffixes, and deterministic SHA-256 digest computation (`25490a2b679ae60bcab42662cda3799f23ef79a62ef964c72398200614b50b6c`).
 - **Hardened CLI Export Engine:** Safe manifest export utility with exclusive atomic file creation (`open(path, "x")`), opt-in `--overwrite` protection, atomic replacement via temporary files, automatic failure cleanup, and umask-preserving permissions.
 
 ### Overall Completion and Acceptance Status
-Phase 2 implementation has passed all read-only audits, targeted verifications, and unit testing suites (23/23 unit and CLI tests passing). It is functionally complete, deterministic, and strictly isolated from database persistence layers. Phase 2 is formally **ACCEPTED** and ready for Phase 3 authorization.
+Phase 2 implementation has passed all read-only audits, targeted verifications, and unit testing suites (25/25 unit and CLI tests passing). It is functionally complete, deterministic, and strictly isolated from database persistence layers. Phase 2 is formally **ACCEPTED** and ready for Phase 3 authorization.
 
 ---
 
@@ -73,7 +73,7 @@ scripts/
 ### 3.1 Domain Models (`models.py`)
 - **`EvidenceProvenance`:** Tracks synthetic evidence origin (`SYN-` references, alert IDs, dispute IDs, analyst attribution, confirmation events, and deterministic `manifest_reference_at`).
 - **`SyntheticAccount`:** Validates account types (`current`, `savings`, `card`, `wallet`), statuses (`active`, `dormant`, `frozen`, `closed`), `YYYY-MM-DD` opened dates, and currency (`INR`).
-- **`SyntheticTransaction`:** Enforces strictly positive amounts with exactly 2 decimal places, currency `INR`, channel enumerations, and mandates `merchant_id=None` and `ip_id=None` in Phase 2.
+- **`SyntheticTransaction`:** Enforces strictly positive amounts with exactly 2 decimal places, currency `INR`, channel enumerations, and mandates `merchant_id=None` and `ip_id=None` in Phase 2. Enforces PostgreSQL `ck_transactions_transfer_target` constraint invariants (`channel == "transfer"` requires non-null `destination_account_id`; non-transfer channels require null `destination_account_id`).
 - **`SyntheticLabel`:** Directly mirrors PostgreSQL `ground_truth_labels` schema post-`m2_0003`. Enforces:
   - Target mutual exclusivity (`label_target="transaction"` requires `txn_id` and `account_id IS NULL`; `label_target="account"` requires `account_id` and `txn_id IS NULL`).
   - Paired incident boundaries (`incident_start_at` and `incident_end_at` must both be set or both be `NULL`).
@@ -95,7 +95,7 @@ scripts/
 
 ### 3.3 Scenario Pattern Generators (`patterns/`)
 - **`mule_ring.py`:** Generates 1 controller and 5 mule accounts. Controller deposits funds into mules who rapidly disperse via external transfers. Generates 6 bounded account-level fraud labels (`money_mule`) with zero transaction labels.
-- **`account_takeover.py`:** Models 3 victim accounts. Legitimate baseline behavior is interrupted by device change, credential takeover, and rapid fund drain. Generates 3 bounded account labels and 16 direct transaction fraud labels (`account_takeover`).
+- **`account_takeover.py`:** Models 3 victim accounts. Legitimate baseline behavior is interrupted by device change, credential takeover, and rapid fund drain. Generates 3 bounded account labels and 16 direct transaction fraud labels (`account_takeover`). All post-takeover drain transactions strictly use `channel = "wire"` (preserving RNG draw sequences and PostgreSQL `ck_transactions_transfer_target` compliance).
 - **`synthetic_identity.py`:** Models 4 credit-building synthetic accounts aged over months before executing bust-out wire drains. Generates 4 bounded account labels and 5 direct transaction labels (`first_party_synthetic`).
 - **`card_fraud.py`:** Models 6 victim card accounts. Normal spending is mixed with bursts of unauthorized card-not-present debits. Generates 20 direct transaction labels (`card_not_present`) with distinct chargeback confirmation (`incident_end_at`) and labeling timestamps.
 - **`structuring.py`:** Models 3 accounts executing deliberate sub-threshold transactions. Uses `StructuringParams.from_rule_set(rs)` factory dependency injection querying `libs/aegis_domain/rules.py:RuleSet`. Verifies simulated detection criteria of rule `R003_STRUCTURING` (each debit $< \text{₹}500{,}000$, 24h count $\ge 3$, 24h sum $\ge \text{₹}1{,}000{,}000$). Generates 3 bounded account labels (`structuring`).
@@ -128,7 +128,7 @@ All 13 files authorized for Phase 2 were created in the designated repository lo
 | 10 | `ml/src/aegis_ml/scenarios/patterns/structuring.py` | AML sub-threshold structuring generator with RuleSet DI (3 accounts, 21 txns, 3 labels). |
 | 11 | `ml/src/aegis_ml/scenarios/patterns/legitimate_clean.py` | Negative control legitimate generator (8 accounts, 133 txns, 45 labels). |
 | 12 | `scripts/generate_synthetic_scenarios.py` | Standalone CLI utility for generation, verification, and non-destructive JSON export. |
-| 13 | `tests/m2/unit/test_synthetic_scenarios.py` | Comprehensive unit and CLI safety test suite (23 passing tests). |
+| 13 | `tests/m2/unit/test_synthetic_scenarios.py` | Comprehensive unit and CLI safety test suite (25 passing tests). |
 
 ---
 
@@ -163,7 +163,7 @@ Manifest construction executes exhaustive validation:
 
 ## 6. Testing and Verification
 
-Targeted testing was conducted in the isolated Python 3.12 environment (`.venv-m2`). All 23 unit and CLI safety tests pass.
+Targeted testing was conducted in the isolated Python 3.12 environment (`.venv-m2`). All 25 unit and CLI safety tests pass.
 
 ### 6.1 Unit Test Execution Command
 ```bash
@@ -177,39 +177,41 @@ platform darwin -- Python 3.12.15, pytest-8.3.4, pluggy-1.7.0 -- /Users/haripras
 cachedir: .pytest_cache
 rootdir: /Users/hariprasathc/Projects/aegisflow
 plugins: anyio-4.15.1
-collected 23 items                                                             
+collected 25 items
 
 tests/m2/unit/test_synthetic_scenarios.py::test_manifest_hash_determinism PASSED [  4%]
 tests/m2/unit/test_synthetic_scenarios.py::test_manifest_hash_verification PASSED [  8%]
-tests/m2/unit/test_rng_stability_guarantees PASSED [ 13%]
-tests/m2/unit/test_all_six_scenarios_present PASSED [ 17%]
-tests/m2/unit/test_typology_registry_consistency PASSED [ 21%]
-tests/m2/unit/test_incident_constraint_compliance PASSED [ 26%]
-tests/m2/unit/test_bounded_incident_coverage PASSED [ 30%]
-tests/m2/unit/test_referential_integrity PASSED [ 34%]
-tests/m2/unit/test_no_direct_label_conflicts PASSED [ 39%]
-tests/m2/unit/test_clean_account_validity_horizon PASSED [ 43%]
-tests/m2/unit/test_no_same_typology_overlapping_incidents PASSED [ 47%]
-tests/m2/unit/test_mule_ring_controller_and_account_labels PASSED [ 52%]
-tests/m2/unit/test_external_refs_unique_and_valid PASSED [ 56%]
-tests/m2/unit/test_evidence_provenance_markers PASSED [ 60%]
-tests/m2/unit/test_amounts_currency_and_precision PASSED [ 65%]
-tests/m2/unit/test_structuring_factory_and_detection_condition PASSED [ 69%]
-tests/m2/unit/test_cli_export_new_destination_succeeds PASSED [ 73%]
-tests/m2/unit/test_cli_export_existing_without_overwrite_fails_and_preserves PASSED [ 78%]
-tests/m2/unit/test_cli_export_existing_with_overwrite_succeeds PASSED [ 82%]
-tests/m2/unit/test_cli_export_creates_parent_directories PASSED [ 86%]
-tests/m2/unit/test_cli_export_no_partial_or_truncated_output_on_write_failure PASSED [ 91%]
-tests/m2/unit/test_cli_export_temp_file_cleaned_up_on_replace_failure PASSED [ 95%]
-tests/m2/unit/test_cli_export_permissions_appropriate PASSED [100%]
+tests/m2/unit/test_rng_stability_guarantees PASSED [ 12%]
+tests/m2/unit/test_all_six_scenarios_present PASSED [ 16%]
+tests/m2/unit/test_typology_registry_consistency PASSED [ 20%]
+tests/m2/unit/test_incident_constraint_compliance PASSED [ 24%]
+tests/m2/unit/test_bounded_incident_coverage PASSED [ 28%]
+tests/m2/unit/test_referential_integrity PASSED [ 32%]
+tests/m2/unit/test_no_direct_label_conflicts PASSED [ 36%]
+tests/m2/unit/test_clean_account_validity_horizon PASSED [ 40%]
+tests/m2/unit/test_no_same_typology_overlapping_incidents PASSED [ 44%]
+tests/m2/unit/test_mule_ring_controller_and_account_labels PASSED [ 48%]
+tests/m2/unit/test_external_refs_unique_and_valid PASSED [ 52%]
+tests/m2/unit/test_evidence_provenance_markers PASSED [ 56%]
+tests/m2/unit/test_amounts_currency_and_precision PASSED [ 60%]
+tests/m2/unit/test_structuring_factory_and_detection_condition PASSED [ 64%]
+tests/m2/unit/test_cli_export_new_destination_succeeds PASSED [ 68%]
+tests/m2/unit/test_cli_export_existing_without_overwrite_fails_and_preserves PASSED [ 72%]
+tests/m2/unit/test_cli_export_existing_with_overwrite_succeeds PASSED [ 76%]
+tests/m2/unit/test_cli_export_creates_parent_directories PASSED [ 80%]
+tests/m2/unit/test_cli_export_no_partial_or_truncated_output_on_write_failure PASSED [ 84%]
+tests/m2/unit/test_cli_export_temp_file_cleaned_up_on_replace_failure PASSED [ 88%]
+tests/m2/unit/test_cli_export_permissions_appropriate PASSED [ 92%]
+tests/m2/unit/test_transfer_target_constraint_model_validation PASSED [ 96%]
+tests/m2/unit/test_account_takeover_channel_alignment_regression PASSED [100%]
 
-============================== 23 passed in 0.51s ==============================
+============================== 25 passed in 0.53s ==============================
 ```
 
 ### 6.3 Standalone CLI Verification
 ```bash
 $ PYTHONPATH=services/ingestion/src:ml/src:. .venv-m2/bin/python scripts/generate_synthetic_scenarios.py --verify-hash
-Generated manifest: 6 scenarios, hash=551ac3b14190667005cabf160c28ce28d42b42fe1cd5fda8f1ead0277afcbe13
+Generated manifest: 6 scenarios, hash=25490a2b679ae60bcab42662cda3799f23ef79a62ef964c72398200614b50b6c
 Manifest hash verification: PASSED
 ```
 
@@ -225,7 +227,7 @@ Manifest hash verification: PASSED
 | **Total Labels** | `102` |
 | **Random Seed** | `20261010` |
 | **Manifest Version** | `"2.0"` |
-| **Canonical SHA-256 Digest** | `551ac3b14190667005cabf160c28ce28d42b42fe1cd5fda8f1ead0277afcbe13` |
+| **Canonical SHA-256 Digest** | `25490a2b679ae60bcab42662cda3799f23ef79a62ef964c72398200614b50b6c` |
 
 ### Scenario Breakdown
 
@@ -238,6 +240,14 @@ Manifest hash verification: PASSED
 | `structuring` | `"structuring"` | 3 | 21 | 3 | 3 account labels (bounded) |
 | `legitimate_clean` | `None` (`is_fraud=False`) | 8 | 133 | 45 | 8 account labels (timeless), 37 txn labels |
 | **Total** | — | **30** | **405** | **102** | — |
+
+### 7.1 Phase 3 Risk 1 Alignment: ATO Channel Normalization (Option B)
+During pre-Phase 3 schema alignment audits, 7 post-takeover drain transactions in `account_takeover.py` were identified that randomly selected `channel = "transfer"` without defining internal destination accounts (`destination_account_id = None`), which would violate PostgreSQL constraint `ck_transactions_transfer_target`.
+- **Resolution:** In accordance with approved Option B, post-takeover external drains were aligned to `channel = "wire"` (representing external interbank wire transfers).
+- **RNG Sequence Invariant:** In `account_takeover.py`, `_ = rng.choice(["wire", "transfer"])` was maintained to preserve identical RNG consumption across all 34 transactions, ensuring all transaction IDs, account IDs, amounts, and timestamps remained completely unchanged.
+- **Model Invariant:** `SyntheticTransaction` validation was strengthened to enforce `ck_transactions_transfer_target` at model construction time.
+- **Full Manifest Constraint Audit:** Audited all 405 transactions across all 6 scenarios against PostgreSQL constraint `ck_transactions_transfer_target`; verified 0 violations.
+- **Updated Digest:** The cryptographic digest of the canonical manifest updated from `551ac3b1...` to `25490a2b679ae60bcab42662cda3799f23ef79a62ef964c72398200614b50b6c`.
 
 ### Why Preserving the Hash Matters
 1. **Model Reproducibility:** Downstream machine learning feature pipelines and supervised classifiers trained in Phase 4 rely on exact, stable label boundaries and transaction histories.
@@ -259,7 +269,10 @@ Phase 2 was executed under strict database isolation safeguards:
 
 ## 9. Git and Delivery Status
 
-### Current Git State
+### 9.1 Historical Pre-Commit Baseline State (Phase 2 Initial Delivery)
+> [!NOTE]
+> The terminal output below records the historical working-tree status prior to the creation of the Phase 2 delivery commit (`1c2e80f`), capturing the initial delivery state of the 13 implementation and test files alongside this report.
+
 ```text
 On branch feature/m2-feature-store
 Your branch is up to date with 'origin/feature/m2-feature-store'.
@@ -274,10 +287,10 @@ Untracked files:
 nothing added to commit but untracked files present (use "git add" to track)
 ```
 
-### Baseline Commit
-- **Commit Hash:** `c0dc58931ef12545d6b59b2e698774f839a8b42c` (`c0dc589`)
-- **Commit Subject:** `feat(m2): add incident-level ground truth schema`
-- **Phase 2 Status:** Implemented, verified, and uncommitted (awaiting Phase 2 review/commit authorization).
+### 9.2 Baseline Commit
+- **Commit Hash:** `1c2e80f97e28a99f3a76bf2c7f36b291681c1697` (`1c2e80f`)
+- **Commit Subject:** `feat(m2): complete synthetic scenario generation`
+- **Phase 2 Status:** Implemented, verified, and Option B alignment applied.
 - **Working Tree Integrity:** Clean on all tracked repository files (`git diff --check` passes with zero output). Exactly 13 implementation/test files and 1 documentation file delivered.
 
 ---
@@ -287,7 +300,7 @@ nothing added to commit but untracked files present (use "git add" to track)
 | Acceptance Criteria | Verification Assessment | Status |
 |---|---|---|
 | **Functional Completeness** | All 6 scenarios implemented with required counts, typologies, and relationships. | **PASS** |
-| **Test Coverage** | 23 targeted unit tests passing (100% success rate). | **PASS** |
+| **Test Coverage** | 25 targeted unit tests passing (100% success rate). | **PASS** |
 | **Determinism** | Bit-for-bit serialization determinism verified; canonical hash matching. | **PASS** |
 | **CLI Output Safety** | Exclusive creation, `--overwrite` flag, atomic replacement, cleanup on error verified. | **PASS** |
 | **Scope Compliance** | Exactly 13 authorized code/test files delivered; zero database operations. | **PASS** |

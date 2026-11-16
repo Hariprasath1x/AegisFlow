@@ -6,8 +6,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import re
-from uuid import UUID
+from uuid import UUID, uuid4
 import numpy as np
+from pydantic import ValidationError
 import pytest
 
 from aegis_ml.scenarios.constants import (
@@ -491,3 +492,131 @@ def test_cli_export_permissions_appropriate(tmp_path):
     assert ret == 0
     mode_overwritten = stat.S_IMODE(os.stat(custom_out).st_mode)
     assert mode_overwritten == 0o640
+
+
+# 8. PostgreSQL ck_transactions_transfer_target Constraint Alignment
+def test_transfer_target_constraint_model_validation():
+    """Verify SyntheticTransaction enforces PostgreSQL ck_transactions_transfer_target invariant."""
+    acc1 = uuid4()
+    acc2 = uuid4()
+    now_utc = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    # 1. Valid internal transfer with destination account succeeds
+    valid_transfer = SyntheticTransaction(
+        txn_id=uuid4(),
+        external_ref="AF-TEST-XFER-001",
+        account_id=acc1,
+        scenario_tag="TEST",
+        channel="transfer",
+        direction="debit",
+        amount=Decimal("1500.00"),
+        currency="INR",
+        occurred_at=now_utc,
+        destination_account_id=acc2,
+    )
+    assert valid_transfer.channel == "transfer"
+    assert valid_transfer.destination_account_id == acc2
+
+    # 2. Invalid transfer without destination account raises ValidationError
+    with pytest.raises(ValidationError, match="channel='transfer' requires destination_account_id to be non-null"):
+        SyntheticTransaction(
+            txn_id=uuid4(),
+            external_ref="AF-TEST-XFER-002",
+            account_id=acc1,
+            scenario_tag="TEST",
+            channel="transfer",
+            direction="debit",
+            amount=Decimal("1500.00"),
+            currency="INR",
+            occurred_at=now_utc,
+            destination_account_id=None,
+        )
+
+    # 3. Invalid non-transfer (e.g. card/wire) with destination account raises ValidationError
+    with pytest.raises(ValidationError, match="channel='wire' requires destination_account_id to be null"):
+        SyntheticTransaction(
+            txn_id=uuid4(),
+            external_ref="AF-TEST-WIRE-001",
+            account_id=acc1,
+            scenario_tag="TEST",
+            channel="wire",
+            direction="debit",
+            amount=Decimal("1500.00"),
+            currency="INR",
+            occurred_at=now_utc,
+            destination_account_id=acc2,
+        )
+
+    with pytest.raises(ValidationError, match="channel='card' requires destination_account_id to be null"):
+        SyntheticTransaction(
+            txn_id=uuid4(),
+            external_ref="AF-TEST-CARD-001",
+            account_id=acc1,
+            scenario_tag="TEST",
+            channel="card",
+            direction="debit",
+            amount=Decimal("1500.00"),
+            currency="INR",
+            occurred_at=now_utc,
+            destination_account_id=acc2,
+        )
+
+    # 4. Valid external wire without destination account succeeds
+    valid_wire = SyntheticTransaction(
+        txn_id=uuid4(),
+        external_ref="AF-TEST-WIRE-002",
+        account_id=acc1,
+        scenario_tag="TEST",
+        channel="wire",
+        direction="debit",
+        amount=Decimal("1500.00"),
+        currency="INR",
+        occurred_at=now_utc,
+        destination_account_id=None,
+    )
+    assert valid_wire.channel == "wire"
+    assert valid_wire.destination_account_id is None
+
+
+def test_account_takeover_channel_alignment_regression(manifest: ScenarioManifest):
+    """Verify Option B fix: all 16 post-takeover transactions use wire with destination_account_id=None."""
+    ato_scenario = next(s for s in manifest.scenarios if s.scenario_id == "account_takeover")
+
+    # 1. Total manifest counts unchanged
+    assert len(manifest.scenarios) == 6
+    assert sum(len(s.accounts) for s in manifest.scenarios) == 30
+    assert sum(len(s.transactions) for s in manifest.scenarios) == 405
+    assert sum(len(s.labels) for s in manifest.scenarios) == 102
+
+    # 2. Inspect ATO post-takeover transactions (16 transactions)
+    # Post-takeover transactions have device_id starting with DEV-ATTACKER-
+    post_takeover_txns = [
+        t for t in ato_scenario.transactions if t.device_id and t.device_id.startswith("DEV-ATTACKER-")
+    ]
+    assert len(post_takeover_txns) == 16
+
+    for txn in post_takeover_txns:
+        assert txn.channel == "wire", f"Expected 'wire', got {txn.channel} for {txn.external_ref}"
+        assert txn.destination_account_id is None
+
+    # 3. Explicitly verify the 7 previously affected transaction IDs
+    affected_ids = {
+        UUID("ef16970b-b753-590e-b407-f5ba2a15988b"): "AF-M2-SYN-ATO-000017",
+        UUID("93c40f1f-bee6-5a49-9870-630ab813aac0"): "AF-M2-SYN-ATO-000018",
+        UUID("3c1a757b-117b-54a1-aa18-97a0668569e5"): "AF-M2-SYN-ATO-000019",
+        UUID("baa18240-aa57-5db4-9bea-9674414db702"): "AF-M2-SYN-ATO-000020",
+        UUID("c92381fe-c838-5a95-bc4c-3b18540b8e20"): "AF-M2-SYN-ATO-000028",
+        UUID("92820e50-4533-586c-a31b-8fe3eae8bbb7"): "AF-M2-SYN-ATO-000029",
+        UUID("861b0f8d-74ca-5650-82a1-9a628b9b8b7c"): "AF-M2-SYN-ATO-000032",
+    }
+    ato_txns_by_id = {t.txn_id: t for t in ato_scenario.transactions}
+
+    for txn_id, expected_ref in affected_ids.items():
+        assert txn_id in ato_txns_by_id, f"Missing transaction {txn_id}"
+        t = ato_txns_by_id[txn_id]
+        assert t.external_ref == expected_ref
+        assert t.channel == "wire"
+        assert t.destination_account_id is None
+
+    # 4. Verify canonical hash
+    assert manifest.manifest_hash == "25490a2b679ae60bcab42662cda3799f23ef79a62ef964c72398200614b50b6c"

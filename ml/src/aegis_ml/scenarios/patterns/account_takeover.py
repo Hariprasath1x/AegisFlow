@@ -90,7 +90,8 @@ def generate_account_takeover(rng: np.random.Generator) -> ScenarioDefinition:
             po_time = takeover_start_time + timedelta(hours=po_idx * 6 + int(rng.integers(1, 3)))
             amt_val = float(rng.uniform(80000, 450000))
             amt = canonical_amount(amt_val)
-            channel = str(rng.choice(["wire", "transfer"]))
+            _ = rng.choice(["wire", "transfer"])  # Preserve RNG draw sequence for subsequent iterations
+            channel = "wire"
 
             t_id = synthetic_uuid("txn", scenario_id, txn_global_idx)
             txn = SyntheticTransaction(
