@@ -1,0 +1,9 @@
+stages:
+  prepare_ieee:
+    cmd: PYTHONPATH=ml/src python -m aegis_ml.training.prepare_ieee --raw data/raw/ieee --out data/processed
+    deps:
+      - data/raw/ieee
+      - ml/src/aegis_ml/training/prepare_ieee.py
+    outs:
+      - data/processed/ieee_transactions.parquet
+      - data/processed/ieee_meta.json
