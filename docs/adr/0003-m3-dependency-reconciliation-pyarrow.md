@@ -1,7 +1,7 @@
 # ADR-0003: Reconcile PyArrow Pin for MLflow 2.17.2 Compatibility in Milestone 3
 
-**Status:** Accepted  
-**Date:** 2026-11-17  
+**Status:** Accepted
+**Date:** 2026-11-17
 **Scope:** Milestone 3 (`feature/m3-fraud-models`)
 
 ## 1. Context & Incompatible Constraints
@@ -65,4 +65,3 @@ Under explicit authorization, adopt the following targeted reconciliation in `ml
 ## 4. Verification
 
 The dependency graph with `pyarrow==17.0.0` was validated using `pip install --dry-run` and completed with exit code 0. All 13 core packages resolve cleanly without requiring CUDA/GPU libraries.
-

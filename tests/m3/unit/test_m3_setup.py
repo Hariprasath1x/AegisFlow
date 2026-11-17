@@ -180,4 +180,3 @@ def test_adr_reconciliation_document_exists() -> None:
     assert "pyarrow==18.1.0" in content
     assert "17.0.0" in content
     assert "pyarrow<18" in content
-
