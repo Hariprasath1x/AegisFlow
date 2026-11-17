@@ -94,3 +94,42 @@ m2: test-m2 test-m2-int verify-m2
 
 .PHONY: up-m2 migrate seed-fraud ingest graph-once features-pit parity test-m2 test-m2-int verify-m2 m2
 
+# ---- M3 targets: append below the M2 block. .RECIPEPREFIX applies only to rules
+# written after it, so M2's tab-indented rules keep working and every M3 rule
+# survives being copied out of this PDF. ----
+.RECIPEPREFIX = >
+PY ?= python
+M3_PATH := PYTHONPATH=ml/src:.
+
+prepare-ieee:
+> dvc repro prepare_ieee
+
+train-fraud:
+> dvc repro train_fraud
+
+compare:
+> $(M3_PATH) $(PY) scripts/champion.py --compare
+
+promote:
+> $(M3_PATH) $(PY) scripts/champion.py --promote --actor $(USER)
+
+rollback:
+> $(M3_PATH) $(PY) scripts/champion.py --rollback --actor $(USER)
+
+typologies:
+> $(M3_PATH) $(PY) -m aegis_ml.evaluation.typology_eval
+
+test-m3:
+> $(M3_PATH) $(PY) -m pytest -q tests/m3/unit
+
+test-m3-int:
+> $(M3_PATH) $(PY) -m pytest -q tests/m3/integration
+
+verify-m3:
+> $(M3_PATH) $(PY) scripts/verify_m3.py
+
+m3: test-m3 train-fraud typologies test-m3-int verify-m3
+
+.PHONY: prepare-ieee train-fraud compare promote rollback typologies \
+ test-m3 test-m3-int verify-m3 m3
+

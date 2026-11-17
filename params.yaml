@@ -1,0 +1,33 @@
+# Append the fraud block to the M2 params.yaml.
+fraud:
+  seed: 42
+  train_weeks: 6 # spec section 14: train weeks 1-6, test 7-8
+  test_weeks: 2
+  embargo_hours: 24 # drop the rows straddling the cut (shared windows)
+  label_horizon_days: 30 # chargebacks arrive late; unmatured labels are excluded
+  calibration_fraction: 0.15 # last 15% of TRAIN time, never random rows
+  max_fpr: 0.01 # the headline operating point
+  review_cost: 3.0 # analyst minutes per flagged transaction
+  friction_cost: 12.0 # cost of declining a good customer
+  xgboost:
+    n_estimators: 800
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 5
+    reg_lambda: 1.0
+    early_stopping_rounds: 60
+    seed: 42
+    n_jobs: 4
+  lightgbm:
+    n_estimators: 800
+    learning_rate: 0.05
+    num_leaves: 63
+    min_child_samples: 50
+    subsample: 0.8
+    colsample_bytree: 0.8
+    early_stopping_rounds: 60
+    seed: 42
+    n_jobs: 4
+
