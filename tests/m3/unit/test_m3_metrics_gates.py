@@ -141,6 +141,7 @@ def test_gates_and_the_noise_band():
             "lift_over_rules": 0.35,
             "pr_auc": 0.71,
             "ece": 0.03,
+            "typology_detection": 0.85,
         },
         champ,
     )
@@ -151,6 +152,7 @@ def test_gates_and_the_noise_band():
             "lift_over_rules": 0.35,
             "pr_auc": 0.71,
             "ece": 0.03,
+            "typology_detection": 0.85,
         },
         champ,
     )
@@ -161,6 +163,7 @@ def test_gates_and_the_noise_band():
             "lift_over_rules": 0.35,
             "pr_auc": 0.71,
             "ece": 0.20,
+            "typology_detection": 0.85,
         },
         champ,
     )
@@ -363,15 +366,21 @@ def test_is_better_strictness_and_ties():
 def test_challenger_wins_exact_relative_lift_boundary():
     """Relative lift exactly equal to min_relative_lift passes; strictly less fails."""
     champ = {"recall_at_1pct_fpr": 0.50}
+    baseline_gates = {
+        "lift_over_rules": 0.35,
+        "pr_auc": 0.65,
+        "ece": 0.03,
+        "typology_detection": 0.85,
+    }
 
     # Exactly 2% lift: 0.50 * 1.02 = 0.5100 -> lift = 0.01 / 0.50 = 0.02
-    chal_exact = {"recall_at_1pct_fpr": 0.5100}
+    chal_exact = {"recall_at_1pct_fpr": 0.5100, **baseline_gates}
     ok_exact, why_exact = challenger_wins(chal_exact, champ, min_relative_lift=0.02)
     assert ok_exact is True
     assert "promote" in why_exact
 
     # Just below 2% lift: 0.5099 -> lift = 0.0099 / 0.50 = 0.0198 < 0.02
-    chal_below = {"recall_at_1pct_fpr": 0.5099}
+    chal_below = {"recall_at_1pct_fpr": 0.5099, **baseline_gates}
     ok_below, why_below = challenger_wins(chal_below, champ, min_relative_lift=0.02)
     assert ok_below is False
     assert "noise band" in why_below
@@ -380,16 +389,112 @@ def test_challenger_wins_exact_relative_lift_boundary():
 def test_challenger_wins_missing_primary_metric():
     """Missing primary metric in challenger or champion returns explanatory failure."""
     champ = {"recall_at_1pct_fpr": 0.52}
-    chal_no_primary = {"pr_auc": 0.75}
+    chal_no_primary = {
+        "lift_over_rules": 0.35,
+        "pr_auc": 0.75,
+        "ece": 0.03,
+        "typology_detection": 0.85,
+    }
     ok1, msg1 = challenger_wins(chal_no_primary, champ)
     assert ok1 is False
-    assert "recall_at_1pct_fpr missing from one of the models" in msg1
+    assert "recall_at_1pct_fpr" in msg1
 
     champ_no_primary = {"pr_auc": 0.70}
-    chal_with_primary = {"recall_at_1pct_fpr": 0.60}
+    chal_with_primary = {
+        "recall_at_1pct_fpr": 0.60,
+        "lift_over_rules": 0.35,
+        "pr_auc": 0.70,
+        "ece": 0.03,
+        "typology_detection": 0.85,
+    }
     ok2, msg2 = challenger_wins(chal_with_primary, champ_no_primary)
     assert ok2 is False
     assert "recall_at_1pct_fpr missing from one of the models" in msg2
+
+
+def test_challenger_wins_each_required_gate_omitted_causes_rejection():
+    """All 5 gate metrics must be present; omitting any one individually causes rejection."""
+    valid_chal = {
+        "recall_at_1pct_fpr": 0.55,
+        "lift_over_rules": 0.35,
+        "pr_auc": 0.65,
+        "ece": 0.03,
+        "typology_detection": 0.85,
+    }
+    champ = {"recall_at_1pct_fpr": 0.50}
+
+    # Verify baseline is fully valid and wins
+    ok_base, msg_base = challenger_wins(valid_chal, champ)
+    assert ok_base is True
+    assert "promote" in msg_base
+
+    # Check each metric individually omitted
+    for m in ("recall_at_1pct_fpr", "lift_over_rules", "pr_auc", "ece", "typology_detection"):
+        omitted = {k: v for k, v in valid_chal.items() if k != m}
+        ok, msg = challenger_wins(omitted, champ)
+        assert ok is False
+        assert m in msg
+        assert "missing" in msg
+
+        # Also verify None value is treated as missing
+        with_none = {**valid_chal, m: None}
+        ok_none, msg_none = challenger_wins(with_none, champ)
+        assert ok_none is False
+        assert m in msg_none
+
+
+def test_challenger_wins_invalid_non_numeric_nan_and_inf_values_rejected():
+    """Challenger metrics with NaN, Inf, strings, or booleans are rejected without crashing."""
+    valid_chal = {
+        "recall_at_1pct_fpr": 0.55,
+        "lift_over_rules": 0.35,
+        "pr_auc": 0.65,
+        "ece": 0.03,
+        "typology_detection": 0.85,
+    }
+    champ = {"recall_at_1pct_fpr": 0.50}
+
+    invalid_values = [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        "invalid_metric",
+        True,
+        False,
+        [0.5],
+    ]
+
+    for m in GATES:
+        for bad_val in invalid_values:
+            chal_bad = {**valid_chal, m: bad_val}
+            ok, msg = challenger_wins(chal_bad, champ)
+            assert ok is False
+            assert m in msg
+            assert ("invalid" in msg or "finite float" in msg)
+
+
+def test_challenger_wins_malformed_champion_metrics_handled_safely():
+    """Champion primary metric with NaN, Inf, non-numeric, or boolean is handled safely."""
+    valid_chal = {
+        "recall_at_1pct_fpr": 0.55,
+        "lift_over_rules": 0.35,
+        "pr_auc": 0.65,
+        "ece": 0.03,
+        "typology_detection": 0.85,
+    }
+
+    bad_champions = [
+        {"recall_at_1pct_fpr": float("nan")},
+        {"recall_at_1pct_fpr": float("inf")},
+        {"recall_at_1pct_fpr": "corrupted_score"},
+        {"recall_at_1pct_fpr": True},
+        {},  # missing
+    ]
+
+    for bad_champ in bad_champions:
+        ok, msg = challenger_wins(valid_chal, bad_champ)
+        assert ok is False
+        assert "recall_at_1pct_fpr" in msg
 
 
 def test_gates_validation_on_non_finite_and_invalid_inputs():

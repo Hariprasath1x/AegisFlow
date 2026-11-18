@@ -100,6 +100,7 @@ m2: test-m2 test-m2-int verify-m2
 .RECIPEPREFIX = >
 PY ?= python
 M3_PATH := PYTHONPATH=ml/src:.
+ACTOR ?=
 
 prepare-ieee:
 > dvc repro prepare_ieee
@@ -111,10 +112,10 @@ compare:
 > $(M3_PATH) $(PY) scripts/champion.py --compare
 
 promote:
-> $(M3_PATH) $(PY) scripts/champion.py --promote --actor $(USER)
+> $(M3_PATH) $(PY) scripts/champion.py --promote $(if $(strip $(ACTOR)),--actor $(strip $(ACTOR)),)
 
 rollback:
-> $(M3_PATH) $(PY) scripts/champion.py --rollback --actor $(USER)
+> $(M3_PATH) $(PY) scripts/champion.py --rollback $(if $(strip $(ACTOR)),--actor $(strip $(ACTOR)),)
 
 typologies:
 > $(M3_PATH) $(PY) -m aegis_ml.evaluation.typology_eval

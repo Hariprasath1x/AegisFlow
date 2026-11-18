@@ -82,14 +82,35 @@ def challenger_wins(
             f"min_relative_lift must be a non-negative finite float, got {min_relative_lift}"
         )
 
+    # 1. Require every promotion gate metric defined in GATES to be present in challenger
+    missing = [m for m in GATES if m not in challenger or challenger[m] is None]
+    if missing:
+        return False, f"challenger missing required gate metric(s): {', '.join(missing)}"
+
+    # 2. Reject non-numeric, boolean, NaN, or infinite gate values in challenger
+    invalid = []
+    for m in GATES:
+        v = challenger[m]
+        if (
+            not isinstance(v, (int, float, np.floating, np.integer))
+            or isinstance(v, bool)
+            or math.isnan(v)
+            or math.isinf(v)
+        ):
+            invalid.append(f"{m}={v}")
+    if invalid:
+        return False, f"challenger has invalid/non-finite gate metric(s): {', '.join(invalid)}"
+
+    # 3. Check gate thresholds
     failed = [
-        check_gate(m, v)[1]
-        for m, v in challenger.items()
-        if m in GATES and not check_gate(m, v)[0]
+        check_gate(m, float(challenger[m]))[1]
+        for m in GATES
+        if not check_gate(m, float(challenger[m]))[0]
     ]
     if failed:
         return False, "challenger failed gates: " + "; ".join(failed)
 
+    # 4. Check primary metric presence and validity on both challenger and champion
     c, p = challenger.get(primary), champion.get(primary)
     if c is None or p is None:
         return False, f"{primary} missing from one of the models"
@@ -100,14 +121,14 @@ def challenger_wins(
         or math.isnan(c)
         or math.isinf(c)
     ):
-        raise ValueError(f"challenger {primary} must be a finite float, got {c}")
+        return False, f"challenger {primary} must be a finite float, got {c}"
     if (
         not isinstance(p, (int, float, np.floating, np.integer))
         or isinstance(p, bool)
         or math.isnan(p)
         or math.isinf(p)
     ):
-        raise ValueError(f"champion {primary} must be a finite float, got {p}")
+        return False, f"champion {primary} must be a finite float, got {p}"
 
     c_f, p_f = float(c), float(p)
     if not is_better(primary, c_f, p_f):
