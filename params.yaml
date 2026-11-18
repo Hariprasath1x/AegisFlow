@@ -5,6 +5,7 @@ fraud:
   test_weeks: 2
   embargo_hours: 24 # drop the rows straddling the cut (shared windows)
   label_horizon_days: 30 # chargebacks arrive late; unmatured labels are excluded
+  val_fraction: 0.10 # early-stopping validation slice (10% of TRAIN time)
   calibration_fraction: 0.15 # last 15% of TRAIN time, never random rows
   max_fpr: 0.01 # the headline operating point
   review_cost: 3.0 # analyst minutes per flagged transaction

@@ -765,3 +765,37 @@ def test_matrix_assembly_no_adapter_alignment_nans() -> None:
     ]
     # No NaNs anywhere in graph features for snapshotted accounts
     assert not X[graph_cols].isna().any().any()
+
+
+def test_build_with_fit_df_isolation() -> None:
+    """26. build() with fit_df isolates frequency encoding to fit_df while preserving PIT context on df."""
+    df = sample_transactions()
+    # TX101 (web), TX102 (app), TX103 (web), TX104 (pos)
+    # df.iloc[:2] only has web and app; pos is unseen
+    fit_df = df.iloc[:2].copy()
+
+    X, mapping = build(df, fit_df=fit_df)
+
+    # Mapping contains only categories from fit_df
+    assert "pos" not in mapping["channel"]
+    assert mapping["channel"]["web"] == 0.5
+    assert mapping["channel"]["app"] == 0.5
+
+    # Rows with seen categories get fit_df frequencies
+    assert X.loc[10, "cat__channel"] == 0.5
+    assert X.loc[20, "cat__channel"] == 0.5
+    assert X.loc[30, "cat__channel"] == 0.5
+    # Row with unseen category (pos at index 40) gets fallback 0.0
+    assert X.loc[40, "cat__channel"] == 0.0
+
+    # Full matrix has all declared features
+    assert list(X.columns) == feature_names()
+    assert len(X) == len(df)
+
+
+def test_build_conflicting_mapping_and_fit_df_raises() -> None:
+    """27. Supplying both mapping and fit_df to build() raises ValueError."""
+    df = sample_transactions()
+    _, dummy_mapping = encode_categoricals(df)
+    with pytest.raises(ValueError, match="Cannot supply both mapping and fit_df"):
+        build(df, mapping=dummy_mapping, fit_df=df.iloc[:2])

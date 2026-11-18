@@ -31,7 +31,13 @@ from ..evaluation.metrics import (
 from ..evaluation.reports import line_chart, write_report
 from ..models.calibration import Calibrator, expected_calibration_error, reliability
 from ..models.fraud_models import train_lightgbm, train_xgboost
-from .matrix import CATEGORICAL, build, feature_names, load_transactions
+from .matrix import (
+    CATEGORICAL,
+    build,
+    encode_categoricals,
+    feature_names,
+    load_transactions,
+)
 from .splits import check_no_time_leak, label_delay_mask, time_split
 
 try:
@@ -43,11 +49,31 @@ OUT = pathlib.Path("artifacts/fraud")
 
 
 def prepare(params: dict[str, Any], df: pd.DataFrame | None = None) -> dict[str, Any]:
-    """Prepare time-split and leak-checked training, calibration, and test matrices."""
+    """Prepare time-split and leak-checked training, validation, calibration, and test matrices."""
     if df is None:
         df = load_transactions()
     else:
         df = df.copy()
+
+    val_fraction = float(params.get("val_fraction", 0.10))
+    calibration_fraction = float(params.get("calibration_fraction", 0.15))
+
+    if not np.isfinite(val_fraction) or not (0.0 < val_fraction < 1.0):
+        raise ValueError(
+            f"val_fraction must be a finite float in (0.0, 1.0), got {val_fraction}"
+        )
+    if not np.isfinite(calibration_fraction) or not (0.0 < calibration_fraction < 1.0):
+        raise ValueError(
+            f"calibration_fraction must be a finite float in (0.0, 1.0), got {calibration_fraction}"
+        )
+    if val_fraction + calibration_fraction >= 1.0:
+        raise ValueError(
+            f"Sum of val_fraction ({val_fraction}) and calibration_fraction ({calibration_fraction}) "
+            f"must be strictly less than 1.0, got {val_fraction + calibration_fraction}"
+        )
+
+    if not df["ts"].is_monotonic_increasing:
+        df = df.sort_values("ts").reset_index(drop=True)
 
     df["split"] = time_split(
         df["ts"],
@@ -68,22 +94,73 @@ def prepare(params: dict[str, Any], df: pd.DataFrame | None = None) -> dict[str,
     if problems:
         raise AssertionError("time leakage: " + "; ".join(problems))
 
-    X_train, mapping = build(train)
-    X_test, _ = build(test, mapping=mapping)
+    if len(train) == 0:
+        raise ValueError("Train split is empty")
+    if len(test) == 0:
+        raise ValueError("Test split is empty")
 
-    # The calibration slice is the LAST 15% of training time, never random rows
-    cut = int(len(X_train) * (1 - params["calibration_fraction"]))
+    n_train = len(train)
+    cut_val = int(n_train * (1.0 - val_fraction - calibration_fraction))
+    cut_cal = int(n_train * (1.0 - calibration_fraction))
+
+    if cut_val <= 0 or (cut_cal - cut_val) <= 0 or (n_train - cut_cal) <= 0:
+        raise ValueError(
+            f"Insufficient training rows ({n_train}) for the requested fractions "
+            f"(val_fraction={val_fraction}, calibration_fraction={calibration_fraction}). "
+            f"Partition sizes: fit={cut_val}, val={cut_cal - cut_val}, cal={n_train - cut_cal}."
+        )
+
+    y_fit = train["is_fraud"].to_numpy()[:cut_val]
+    y_val = train["is_fraud"].to_numpy()[cut_val:cut_cal]
+    y_cal = train["is_fraud"].to_numpy()[cut_cal:]
+    y_test = test["is_fraud"].to_numpy()
+
+    # Class sufficiency validation across all training partitions
+    unique_fit = set(y_fit)
+    if len(unique_fit) < 2 or unique_fit != {0, 1}:
+        raise ValueError(
+            f"Fitting partition does not contain both classes (0 and 1); "
+            f"found classes: {sorted(list(unique_fit))}. Binary classification cannot be trained."
+        )
+
+    unique_val = set(y_val)
+    if len(unique_val) < 2 or unique_val != {0, 1}:
+        raise ValueError(
+            f"Validation partition does not contain both classes (0 and 1); "
+            f"found classes: {sorted(list(unique_val))}. Early stopping with PR-AUC requires both positive and negative samples."
+        )
+
+    unique_cal = set(y_cal)
+    if len(unique_cal) < 2 or unique_cal != {0, 1}:
+        raise ValueError(
+            f"Calibration partition does not contain both classes (0 and 1); "
+            f"found classes: {sorted(list(unique_cal))}. Isotonic calibration requires both positive and negative samples."
+        )
+
+    # Fit frequency encoder exclusively on the fitting partition (first cut_val rows)
+    train_fit = train.iloc[:cut_val]
+    _, mapping = encode_categoricals(train_fit)
+
+    # Build feature matrices preserving historical context across train and test
+    combined = pd.concat([train, test]).sort_values("ts", kind="stable")
+    X_combined, _ = build(combined, mapping=mapping)
+
+    X_train = X_combined.loc[train.index]
+    X_test = X_combined.loc[test.index]
+
     return {
         "df": df,
         "train": train,
         "test": test,
         "mapping": mapping,
-        "X_fit": X_train.iloc[:cut],
-        "y_fit": train["is_fraud"].to_numpy()[:cut],
-        "X_cal": X_train.iloc[cut:],
-        "y_cal": train["is_fraud"].to_numpy()[cut:],
+        "X_fit": X_train.iloc[:cut_val],
+        "y_fit": y_fit,
+        "X_val": X_train.iloc[cut_val:cut_cal],
+        "y_val": y_val,
+        "X_cal": X_train.iloc[cut_cal:],
+        "y_cal": y_cal,
         "X_test": X_test,
-        "y_test": test["is_fraud"].to_numpy(),
+        "y_test": y_test,
     }
 
 
@@ -133,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             **{k: v for k, v in params.items() if not isinstance(v, dict)},
             "features": len(feature_names()),
             "train_rows": len(d["X_fit"]),
+            "val_rows": len(d["X_val"]),
             "cal_rows": len(d["X_cal"]),
             "test_rows": len(d["X_test"]),
             "test_fraud_rate": float(y_test.mean()),
@@ -143,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             ("xgboost", train_xgboost, "xgboost"),
             ("lightgbm", train_lightgbm, "lightgbm"),
         ):
-            model, _ = fn(d["X_fit"], d["y_fit"], d["X_cal"], d["y_cal"], params[key])
+            model, _ = fn(d["X_fit"], d["y_fit"], d["X_val"], d["y_val"], params[key])
             cal = Calibrator().fit(model.predict_proba(d["X_cal"])[:, 1], d["y_cal"])
             probs = cal.transform(model.predict_proba(d["X_test"])[:, 1])
             models[name], calibrated[name] = model, cal

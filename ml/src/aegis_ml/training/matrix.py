@@ -269,6 +269,7 @@ def build(
     as_of_column: str = "ts",
     mapping: dict | None = None,
     graph_snapshots: pd.DataFrame | None = None,
+    fit_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Returns (X DataFrame in feature_names() order, mapping). Point-in-time
     correctness is M2's job; this function only refuses to proceed without it.
@@ -287,6 +288,11 @@ def build(
         raise KeyError("Required column 'amount' missing from input DataFrame")
     if "account_id" not in df.columns:
         raise KeyError("Required column 'account_id' missing from input DataFrame")
+
+    if mapping is not None and fit_df is not None:
+        raise ValueError("Cannot supply both mapping and fit_df to build()")
+    if fit_df is not None:
+        _, mapping = encode_categoricals(fit_df)
 
     # 1. Point-in-time features from M2 (owns all 19 FEATURES)
     pit_kwargs: dict[str, Any] = {"as_of_column": as_of_column}
