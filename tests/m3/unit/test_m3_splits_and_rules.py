@@ -1,16 +1,30 @@
-"""Time splits, label delay and the embargo - the three places a fraud model
-quietly reads the future or claims a lift it did not earn.
+"""Time splits, label delay, embargo, and deterministic six-rule fraud baseline.
 
-Unit tests for AegisFlow Milestone 3 - Step 3.2.
-(Note: Rules baseline unit tests belong to Step 3.5 and are intentionally omitted here).
+Unit tests for AegisFlow Milestone 3 - Step 3.2 and Step 3.5.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import numpy as np
 import pandas as pd
 import pytest
 
+from aegis_ml.evaluation.rules_baseline import (
+    Rule,
+    R001,
+    R002,
+    R003,
+    R004,
+    R005,
+    R006,
+    RULES,
+    DEFAULT_OPTIONAL_COLUMNS,
+    hits,
+    score,
+    decisions,
+    explain,
+)
 from aegis_ml.training.splits import (
     TRAIN_WEEKS,
     TEST_WEEKS,
@@ -222,3 +236,451 @@ def test_check_no_time_leak_detects_nat_timestamps() -> None:
     assert len(p_both) == 2
     assert "train split contains missing timestamps (NaT)" in p_both[0]
     assert "test split contains missing timestamps (NaT)" in p_both[1]
+
+
+# ============================================================================
+# Section 2: Deterministic Six-Rule Fraud Baseline Unit Tests (Step 3.5)
+# ============================================================================
+
+
+def test_rules_inventory_ids_order_descriptions_and_weights() -> None:
+    """13. Exact six-rule inventory, IDs, ordering, descriptions, weights, list container, and frozen immutability."""
+    assert len(RULES) == 6
+    assert isinstance(RULES, list)
+
+    expected = [
+        ("R001", "amount above 50,000", 1.0),
+        ("R002", "new device for this account", 1.0),
+        ("R003", "more than 5 transactions in the last hour", 1.0),
+        ("R004", "amount more than 5x the account's 30-day average", 1.0),
+        ("R005", "impossible travel: two countries within an hour", 2.0),
+        ("R006", "device shared by more than 3 accounts", 1.0),
+    ]
+
+    for rule, (exp_id, exp_desc, exp_weight) in zip(RULES, expected):
+        assert rule.id == exp_id
+        assert rule.description == exp_desc
+        assert rule.weight == exp_weight
+        assert callable(rule.predicate)
+
+        # Frozen dataclass check
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            rule.weight = 99.0  # type: ignore[misc]
+
+    # Verify exported individual constants match tuple elements
+    assert RULES[0] is R001
+    assert RULES[1] is R002
+    assert RULES[2] is R003
+    assert RULES[3] is R004
+    assert RULES[4] is R005
+    assert RULES[5] is R006
+
+
+def test_rule_r001_amount_boundaries_and_predicates() -> None:
+    """14. R001 triggers strictly when amount > 50,000."""
+    df = pd.DataFrame(
+        {
+            "amount": [50000.0, 50000.01, 100000.0, 49999.99, 0.0, -50.0, np.nan],
+        }
+    )
+    res = R001.predicate(df)
+    assert isinstance(res, np.ndarray)
+    assert res.dtype == bool
+    # 50000.0 is strictly not > 50000 -> False
+    assert list(res) == [False, True, True, False, False, False, False]
+
+
+def test_rule_r002_new_device_boundaries_and_default() -> None:
+    """15. R002 triggers strictly when device_age_days < 1, with default 99."""
+    # Explicit column present
+    df = pd.DataFrame(
+        {
+            "amount": [100.0] * 6,
+            "device_age_days": [0.0, 0.5, 0.99, 1.0, 10.0, np.nan],
+        }
+    )
+    res = R002.predicate(df)
+    # 0.0, 0.5, 0.99 are < 1 -> True; 1.0 is not < 1 -> False; nan -> default 99 -> False
+    assert list(res) == [True, True, True, False, False, False]
+
+    # Column missing entirely -> default 99 for all rows -> False
+    df_missing = pd.DataFrame({"amount": [100.0, 200.0]})
+    res_missing = R002.predicate(df_missing)
+    assert list(res_missing) == [False, False]
+
+
+def test_rule_r003_txn_count_1h_boundaries_and_default() -> None:
+    """16. R003 triggers strictly when txn_count_1h > 5, with default 0."""
+    # Explicit column present
+    df = pd.DataFrame(
+        {
+            "amount": [100.0] * 6,
+            "txn_count_1h": [0, 4, 5, 6, 10, np.nan],
+        }
+    )
+    res = R003.predicate(df)
+    # 6, 10 are > 5 -> True; 5 is not > 5 -> False; nan -> default 0 -> False
+    assert list(res) == [False, False, False, True, True, False]
+
+    # Column missing entirely -> default 0 -> False
+    df_missing = pd.DataFrame({"amount": [100.0, 200.0]})
+    res_missing = R003.predicate(df_missing)
+    assert list(res_missing) == [False, False]
+
+
+def test_rule_r004_amount_ratio_boundaries_and_default() -> None:
+    """17. R004 triggers strictly when amount > 5 * max(amount_mean_30d, 1.0), with default 1.0."""
+    # Case A: Normal average (100.0) -> threshold = 5 * 100 = 500.0
+    df_a = pd.DataFrame(
+        {
+            "amount": [500.0, 500.01, 1000.0, 499.0],
+            "amount_mean_30d": [100.0, 100.0, 100.0, 100.0],
+        }
+    )
+    res_a = R004.predicate(df_a)
+    assert list(res_a) == [False, True, True, False]
+
+    # Case B: Low average (< 1.0) or zero/negative -> clamped to 1.0 -> threshold = 5.0
+    df_b = pd.DataFrame(
+        {
+            "amount": [5.0, 5.01, 6.0, 4.0],
+            "amount_mean_30d": [0.5, 0.0, -10.0, 0.1],
+        }
+    )
+    res_b = R004.predicate(df_b)
+    assert list(res_b) == [False, True, True, False]
+
+    # Case C: Missing column entirely -> default 1.0 -> threshold = 5.0
+    df_c = pd.DataFrame(
+        {
+            "amount": [5.0, 5.01, 6.0, 4.0],
+        }
+    )
+    res_c = R004.predicate(df_c)
+    assert list(res_c) == [False, True, True, False]
+
+    # Case D: NaN in amount_mean_30d -> defaults to 1.0 -> threshold = 5.0
+    df_d = pd.DataFrame(
+        {
+            "amount": [5.0, 6.0],
+            "amount_mean_30d": [np.nan, np.nan],
+        }
+    )
+    res_d = R004.predicate(df_d)
+    assert list(res_d) == [False, True]
+
+
+def test_rule_r005_impossible_travel_boundaries_and_default() -> None:
+    """18. R005 triggers strictly when distinct_countries_1h > 1, with weight 2.0 and default 1."""
+    assert R005.weight == 2.0
+
+    # Explicit column present
+    df = pd.DataFrame(
+        {
+            "amount": [100.0] * 5,
+            "distinct_countries_1h": [0, 1, 2, 5, np.nan],
+        }
+    )
+    res = R005.predicate(df)
+    # 2, 5 are > 1 -> True; 1 is not > 1 -> False; nan -> default 1 -> False
+    assert list(res) == [False, False, True, True, False]
+
+    # Column missing entirely -> default 1 -> False
+    df_missing = pd.DataFrame({"amount": [100.0, 200.0]})
+    res_missing = R005.predicate(df_missing)
+    assert list(res_missing) == [False, False]
+
+
+def test_rule_r006_device_account_degree_boundaries_and_default() -> None:
+    """19. R006 triggers strictly when device_account_degree > 3, with default 1."""
+    # Explicit column present
+    df = pd.DataFrame(
+        {
+            "amount": [100.0] * 6,
+            "device_account_degree": [1, 2, 3, 4, 10, np.nan],
+        }
+    )
+    res = R006.predicate(df)
+    # 4, 10 are > 3 -> True; 3 is not > 3 -> False; nan -> default 1 -> False
+    assert list(res) == [False, False, False, True, True, False]
+
+    # Column missing entirely -> default 1 -> False
+    df_missing = pd.DataFrame({"amount": [100.0, 200.0]})
+    res_missing = R006.predicate(df_missing)
+    assert list(res_missing) == [False, False]
+
+
+def test_missing_required_amount_column_fails_closed() -> None:
+    """20. Missing required 'amount' column raises KeyError across all functions and predicates requiring it."""
+    df_no_amount = pd.DataFrame({"device_age_days": [0.5], "txn_count_1h": [10]})
+
+    with pytest.raises(KeyError, match="amount"):
+        hits(df_no_amount)
+
+    with pytest.raises(KeyError, match="amount"):
+        score(df_no_amount)
+
+    with pytest.raises(KeyError, match="amount"):
+        decisions(df_no_amount)
+
+    with pytest.raises(KeyError, match="amount"):
+        explain(df_no_amount)
+
+    with pytest.raises(KeyError, match="amount"):
+        R001.predicate(df_no_amount)
+
+    with pytest.raises(KeyError, match="amount"):
+        R004.predicate(df_no_amount)
+
+    # Empty DataFrame with no columns
+    with pytest.raises(KeyError, match="amount"):
+        hits(pd.DataFrame())
+
+
+def test_weighted_scoring_exact_math() -> None:
+    """21. Exact weighted sum of fired rules, verifying weights (1.0 for R001-R004, R006; 2.0 for R005)."""
+    df = pd.DataFrame(
+        [
+            # Row 0: Clean transaction (no rules fire) -> 0.0
+            {
+                "amount": 100.0,
+                "device_age_days": 10.0,
+                "txn_count_1h": 1,
+                "amount_mean_30d": 100.0,
+                "distinct_countries_1h": 1,
+                "device_account_degree": 1,
+            },
+            # Row 1: R001 only (amount > 50_000) -> 1.0
+            {
+                "amount": 60000.0,
+                "device_age_days": 10.0,
+                "txn_count_1h": 1,
+                "amount_mean_30d": 50000.0,
+                "distinct_countries_1h": 1,
+                "device_account_degree": 1,
+            },
+            # Row 2: R005 only (impossible travel) -> 2.0
+            {
+                "amount": 100.0,
+                "device_age_days": 10.0,
+                "txn_count_1h": 1,
+                "amount_mean_30d": 100.0,
+                "distinct_countries_1h": 2,
+                "device_account_degree": 1,
+            },
+            # Row 3: R001 (1.0) + R005 (2.0) -> 3.0
+            {
+                "amount": 60000.0,
+                "device_age_days": 10.0,
+                "txn_count_1h": 1,
+                "amount_mean_30d": 50000.0,
+                "distinct_countries_1h": 3,
+                "device_account_degree": 1,
+            },
+            # Row 4: R001 (1.0) + R002 (1.0) + R003 (1.0) + R004 (1.0) + R006 (1.0) (all except R005) -> 5.0
+            {
+                "amount": 60000.0,
+                "device_age_days": 0.5,
+                "txn_count_1h": 8,
+                "amount_mean_30d": 1000.0,
+                "distinct_countries_1h": 1,
+                "device_account_degree": 4,
+            },
+            # Row 5: ALL 6 rules fire -> 1.0 + 1.0 + 1.0 + 1.0 + 2.0 + 1.0 = 7.0
+            {
+                "amount": 60000.0,
+                "device_age_days": 0.2,
+                "txn_count_1h": 9,
+                "amount_mean_30d": 100.0,
+                "distinct_countries_1h": 2,
+                "device_account_degree": 5,
+            },
+        ]
+    )
+
+    s = score(df)
+    assert isinstance(s, np.ndarray)
+    assert s.dtype == np.float64
+    np.testing.assert_array_almost_equal(s, [0.0, 1.0, 2.0, 3.0, 5.0, 7.0])
+
+
+def test_decision_thresholds_at_varying_min_weights() -> None:
+    """22. Decision function evaluates score(df) >= min_weight across multiple thresholds."""
+    df = pd.DataFrame(
+        [
+            # Row 0: score 0.0
+            {"amount": 100.0, "amount_mean_30d": 100.0},
+            # Row 1: score 1.0 (R001 only)
+            {"amount": 60000.0, "amount_mean_30d": 50000.0},
+            # Row 2: score 2.0 (R005 only, weight 2.0)
+            {"amount": 100.0, "amount_mean_30d": 100.0, "distinct_countries_1h": 2},
+            # Row 3: score 3.0 (R001 + R005)
+            {"amount": 60000.0, "amount_mean_30d": 50000.0, "distinct_countries_1h": 2},
+            # Row 4: score 7.0 (all 6 rules)
+            {
+                "amount": 60000.0,
+                "device_age_days": 0.1,
+                "txn_count_1h": 10,
+                "amount_mean_30d": 100.0,
+                "distinct_countries_1h": 2,
+                "device_account_degree": 4,
+            },
+        ]
+    )
+
+    # min_weight = 1.0 (default)
+    d_1 = decisions(df, min_weight=1.0)
+    assert d_1.dtype == bool
+    assert list(d_1) == [False, True, True, True, True]
+
+    # min_weight = 2.0 (row 1 with score 1.0 drops out; row 2 with score 2.0 stays)
+    d_2 = decisions(df, min_weight=2.0)
+    assert list(d_2) == [False, False, True, True, True]
+
+    # min_weight = 3.0
+    d_3 = decisions(df, min_weight=3.0)
+    assert list(d_3) == [False, False, False, True, True]
+
+    # min_weight = 7.0
+    d_7 = decisions(df, min_weight=7.0)
+    assert list(d_7) == [False, False, False, False, True]
+
+    # min_weight = 7.5 (exceeds max possible score)
+    d_8 = decisions(df, min_weight=7.5)
+    assert list(d_8) == [False, False, False, False, False]
+
+
+def test_explain_ordering_and_multi_rule_hits() -> None:
+    """23. Explanations return ordered IDs of fired rules preserving R001-R006 sequence."""
+    df = pd.DataFrame(
+        [
+            # Row 0: No rules
+            {"amount": 100.0, "amount_mean_30d": 100.0},
+            # Row 1: R001 only
+            {"amount": 60000.0, "amount_mean_30d": 50000.0},
+            # Row 2: R005 only
+            {"amount": 100.0, "amount_mean_30d": 100.0, "distinct_countries_1h": 2},
+            # Row 3: R001 and R005
+            {"amount": 60000.0, "amount_mean_30d": 50000.0, "distinct_countries_1h": 2},
+            # Row 4: R002 and R006 (skip R001, R003, R004, R005)
+            {
+                "amount": 100.0,
+                "device_age_days": 0.5,
+                "amount_mean_30d": 100.0,
+                "device_account_degree": 5,
+            },
+            # Row 5: All 6 rules
+            {
+                "amount": 60000.0,
+                "device_age_days": 0.1,
+                "txn_count_1h": 10,
+                "amount_mean_30d": 100.0,
+                "distinct_countries_1h": 2,
+                "device_account_degree": 4,
+            },
+        ]
+    )
+
+    exp = explain(df)
+    assert isinstance(exp, list)
+    assert len(exp) == 6
+    assert exp[0] == []
+    assert exp[1] == ["R001"]
+    assert exp[2] == ["R005"]
+    assert exp[3] == ["R001", "R005"]
+    assert exp[4] == ["R002", "R006"]
+    assert exp[5] == ["R001", "R002", "R003", "R004", "R005", "R006"]
+
+
+def test_empty_dataframe_all_functions() -> None:
+    """24. Empty DataFrame with required amount column returns valid empty structures."""
+    df_empty = pd.DataFrame(columns=["amount", "device_age_days"])
+
+    h = hits(df_empty)
+    assert len(h) == 6
+    for k, v in h.items():
+        assert isinstance(v, np.ndarray)
+        assert v.dtype == bool
+        assert len(v) == 0
+
+    s = score(df_empty)
+    assert isinstance(s, np.ndarray)
+    assert s.dtype == np.float64
+    assert len(s) == 0
+
+    d = decisions(df_empty)
+    assert isinstance(d, np.ndarray)
+    assert d.dtype == bool
+    assert len(d) == 0
+
+    e = explain(df_empty)
+    assert e == []
+
+
+def test_input_dataframe_immutability() -> None:
+    """25. Input DataFrames are strictly not mutated by any baseline function."""
+    df = pd.DataFrame(
+        {
+            "amount": [100.0, 60000.0],
+            "device_age_days": [0.5, np.nan],
+            "amount_mean_30d": [50.0, 100.0],
+            "distinct_countries_1h": [1, 2],
+        },
+        index=[10, 20],
+    )
+    df_before = df.copy(deep=True)
+
+    _ = hits(df)
+    _ = score(df)
+    _ = decisions(df, min_weight=1.5)
+    _ = explain(df)
+
+    pd.testing.assert_frame_equal(df, df_before)
+
+
+def test_non_monotonic_and_duplicate_index_preservation() -> None:
+    """26. Arbitrary non-monotonic and duplicate index labels are handled positionally without alignment errors."""
+    df = pd.DataFrame(
+        {
+            "amount": [100.0, 60000.0, 100.0, 70000.0, 100.0, 80000.0],
+            "amount_mean_30d": [100.0] * 6,
+        },
+        index=[100, 20, 100, 5, 50, 20],
+    )
+
+    h = hits(df)
+    assert len(h["R001"]) == 6
+    assert list(h["R001"]) == [False, True, False, True, False, True]
+    assert list(h["R004"]) == [False, True, False, True, False, True]
+
+    s = score(df)
+    assert len(s) == 6
+    np.testing.assert_array_equal(s, [0.0, 2.0, 0.0, 2.0, 0.0, 2.0])
+
+    d = decisions(df, min_weight=2.0)
+    assert len(d) == 6
+    assert list(d) == [False, True, False, True, False, True]
+
+    e = explain(df)
+    assert len(e) == 6
+    assert e[0] == []
+    assert e[1] == ["R001", "R004"]
+    assert e[2] == []
+    assert e[3] == ["R001", "R004"]
+    assert e[4] == []
+    assert e[5] == ["R001", "R004"]
+
+
+def test_type_and_argument_validation() -> None:
+    """27. Non-DataFrame inputs raise TypeError across public baseline functions."""
+    with pytest.raises(TypeError, match="df must be a pandas DataFrame"):
+        hits("not_a_df")  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="df must be a pandas DataFrame"):
+        score([{"amount": 100.0}])  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="df must be a pandas DataFrame"):
+        decisions(None)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="df must be a pandas DataFrame"):
+        explain({"amount": 100.0})  # type: ignore[arg-type]
