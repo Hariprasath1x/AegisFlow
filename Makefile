@@ -117,6 +117,9 @@ promote:
 rollback:
 > $(M3_PATH) $(PY) scripts/champion.py --rollback $(if $(strip $(ACTOR)),--actor $(strip $(ACTOR)),)
 
+generate:
+> $(M3_PATH) $(PY) -m aegis_ml.scenarios.generate_typologies --out data/processed
+
 typologies:
 > $(M3_PATH) $(PY) -m aegis_ml.evaluation.typology_eval
 
@@ -132,5 +135,4 @@ verify-m3:
 m3: test-m3 train-fraud typologies test-m3-int verify-m3
 
 .PHONY: prepare-ieee train-fraud compare promote rollback typologies \
- test-m3 test-m3-int verify-m3 m3
-
+ test-m3 test-m3-int verify-m3 m3 generate

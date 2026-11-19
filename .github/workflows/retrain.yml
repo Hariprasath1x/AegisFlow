@@ -1,0 +1,45 @@
+# .github/workflows/retrain.yml - the gate that stops a worse model merging.
+name: retrain
+
+on:
+  pull_request:
+    paths: ["ml/**", "params.yaml", "dvc.yaml"]
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    services:
+      mlflow:
+        image: ghcr.io/mlflow/mlflow:v2.17.2
+        ports: ["5000:5000"]
+    env:
+      MLFLOW_TRACKING_URI: http://localhost:5000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r ml/requirements-train.txt pytest
+      - name: Unit tests (no data needed)
+        run: PYTHONPATH=ml/src:. pytest -q tests/m3/unit
+      - name: Pull data
+        run: |
+          REMOTE_URL=$(dvc config remote.localstore.url 2>/dev/null || true)
+          if [[ "$REMOTE_URL" == /tmp/* ]] && [ ! -d "$REMOTE_URL" ]; then
+            echo "::error::DVC remote 'localstore' is configured to a local path ($REMOTE_URL) that does not exist on this hosted runner. A shared remote (S3/GCS/Azure/HTTP) and credentials must be configured for data-backed retraining in CI."
+            exit 1
+          fi
+          dvc pull data/processed --force
+      - name: Train and gate
+        run: PYTHONPATH=ml/src python -m aegis_ml.training.train_fraud
+      - name: Champion/challenger comparison (report only, never promotes)
+        if: always()
+        run: PYTHONPATH=ml/src python scripts/champion.py --compare || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m3-fraud-reports
+          path: reports/

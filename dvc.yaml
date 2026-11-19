@@ -7,3 +7,20 @@ stages:
     outs:
       - data/processed/ieee_transactions.parquet
       - data/processed/ieee_meta.json
+  train_fraud:
+    cmd: PYTHONPATH=ml/src python -m aegis_ml.training.train_fraud
+    deps:
+      - data/processed/ieee_transactions.parquet
+      - ml/src/aegis_ml/features/definitions.py
+      - ml/src/aegis_ml/training/matrix.py
+      - ml/src/aegis_ml/training/splits.py
+      - ml/src/aegis_ml/models/fraud_models.py
+      - ml/src/aegis_ml/models/calibration.py
+      - ml/src/aegis_ml/training/train_fraud.py
+    params:
+      - fraud
+    outs:
+      - artifacts/fraud
+    metrics:
+      - reports/m3_fraud.json:
+          cache: false
