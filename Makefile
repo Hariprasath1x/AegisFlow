@@ -58,6 +58,7 @@ clean:
 
 PY ?= python
 M2_PY := $(if $(wildcard .venv-m2/bin/python),.venv-m2/bin/python,$(PY))
+M2_DVC := $(if $(wildcard .venv-m2/bin/dvc),.venv-m2/bin/dvc,dvc)
 M2_PATH := PYTHONPATH=services/ingestion/src:ml/src:.
 M2_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.m2.yml
 
@@ -86,7 +87,7 @@ graph-once:
 > $(M2_PATH) $(M2_PY) -m aegis_ml.features.graph_features --once
 
 features-pit:
-> dvc repro features_pit
+> $(if $(wildcard .venv-m2/bin),PATH="$(abspath .venv-m2/bin):$$PATH" )$(M2_DVC) repro features_pit
 
 parity:
 > $(M2_PATH) $(M2_PY) -m pytest -q tests/m2/unit/test_m2_parity.py
