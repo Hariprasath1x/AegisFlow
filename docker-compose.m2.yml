@@ -1,0 +1,40 @@
+# docker-compose.m2.yml - layered over docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.m2.yml up -d --build ingestion graph-job
+# Reuses existing postgres, redis, volumes, and aegisnet network from docker-compose.yml.
+services:
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    container_name: aegisflow-ingestion
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${DB_USER:-aegis}:${DB_PASS:-aegis_dev_2026}@postgres:5432/${DB_NAME:-aegisflow}
+      REDIS_URL: redis://redis:6379/0
+      SERVICE_KEY: ${SERVICE_KEY:?set SERVICE_KEY in .env}
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    networks:
+      - aegisnet
+
+  graph-job:
+    build:
+      context: .
+      dockerfile: ml/Dockerfile.graph
+    container_name: aegisflow-graph-job
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${DB_USER:-aegis}:${DB_PASS:-aegis_dev_2026}@postgres:5432/${DB_NAME:-aegisflow}
+      REDIS_URL: redis://redis:6379/0
+    restart: unless-stopped
+    networks:
+      - aegisnet
