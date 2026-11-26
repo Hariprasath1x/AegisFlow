@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from loguru import logger
 from prometheus_client import (
@@ -16,6 +17,7 @@ from prometheus_client import (
 import redis
 
 from ingestion import config, deps, online_features
+from ingestion.locks import account_lock
 from ingestion.persistence import (
     UnknownEntity,
     DuplicateExternalRefError,
@@ -142,11 +144,13 @@ def ingest_transaction(
                 detail="Transaction ID already exists with conflicting payload",
             )
 
-    # 3. Update online feature state in Redis
+    # 3. Update online feature state in Redis under short-lived fenced per-account lock
     r = deps.redis_client()
     try:
         t0 = time.perf_counter()
-        online_features.update(r, t.feature_input())
+        with account_lock(r, t.account_id, ttl_ms=1_000, wait_timeout_s=2.0) as lease:
+            with online_features.fenced_by(lease.key, lease.token):
+                online_features.update(r, t.feature_input())
         ONLINE_FEATURE_SECONDS.observe(time.perf_counter() - t0)
     except (redis.RedisError, Exception) as exc:
         logger.error(f"Redis feature update failed for transaction {t.id}: {exc}")

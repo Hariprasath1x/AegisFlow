@@ -27,7 +27,7 @@ logs:
 db-init:
 	$(COMPOSE) exec -T postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -f /docker-entrypoint-initdb.d/01_init.sql'
 
-## Load demo data
+## Load M1 demo data (direct SQL historical transactions; use 'make ingest-stream' for M2 API streaming)
 seed:
 	python scripts/seed_db.py
 
@@ -57,6 +57,7 @@ clean:
 .RECIPEPREFIX = >
 
 PY ?= python
+M2_PY := $(if $(wildcard .venv-m2/bin/python),.venv-m2/bin/python,$(PY))
 M2_PATH := PYTHONPATH=services/ingestion/src:ml/src:.
 M2_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.m2.yml
 
@@ -64,35 +65,44 @@ up-m2:
 > $(M2_COMPOSE) up -d --build ingestion graph-job
 
 migrate:
-> $(M2_PATH) alembic upgrade head
+> $(M2_PATH) $(M2_PY) -m alembic upgrade head
 
 seed-fraud:
-> $(M2_PATH) $(PY) db/seed/seed_known_fraud.py
+> $(M2_PATH) $(M2_PY) db/seed/seed_known_fraud.py
 
+## Start M2 Ingestion API on :8001 (/health, /ready, /metrics, POST /api/v1/transactions)
 ingest:
-> $(M2_PATH) uvicorn ingestion.main:app --reload --port 8001
+> $(M2_PATH) $(M2_PY) -m uvicorn ingestion.main:app --reload --port 8001
+
+## Stream M1 demo transactions through the M2 Ingestion API -> Postgres + Redis
+ingest-stream:
+> $(M2_PATH) $(M2_PY) scripts/ingest_transactions.py
+
+## Reconcile Postgres-persisted API transactions missing Redis online velocity features
+recover-features:
+> $(M2_PATH) $(M2_PY) scripts/recover_pending_features.py
 
 graph-once:
-> $(M2_PATH) $(PY) -m aegis_ml.features.graph_features --once
+> $(M2_PATH) $(M2_PY) -m aegis_ml.features.graph_features --once
 
 features-pit:
 > dvc repro features_pit
 
 parity:
-> $(M2_PATH) pytest -q tests/m2/unit/test_m2_parity.py
+> $(M2_PATH) $(M2_PY) -m pytest -q tests/m2/unit/test_m2_parity.py
 
 test-m2:
-> $(M2_PATH) pytest -q tests/m2/unit tests/m2/api
+> $(M2_PATH) $(M2_PY) -m pytest -q tests/m2/unit tests/m2/api
 
 test-m2-int:
-> $(M2_PATH) pytest -q tests/m2/integration
+> $(M2_PATH) $(M2_PY) -m pytest -q tests/m2/integration
 
 verify-m2:
-> $(M2_PATH) $(PY) scripts/verify_m2.py
+> $(M2_PATH) $(M2_PY) scripts/verify_m2.py
 
 m2: test-m2 test-m2-int verify-m2
 
-.PHONY: up-m2 migrate seed-fraud ingest graph-once features-pit parity test-m2 test-m2-int verify-m2 m2
+.PHONY: up-m2 migrate seed-fraud ingest ingest-stream recover-features graph-once features-pit parity test-m2 test-m2-int verify-m2 m2
 
 # ---- M3 targets: append below the M2 block. .RECIPEPREFIX applies only to rules
 # written after it, so M2's tab-indented rules keep working and every M3 rule

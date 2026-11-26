@@ -298,13 +298,27 @@ def seed_demo_ledger(cur):
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Seed AegisFlow M1 reference and demo data.")
+    parser.add_argument(
+        "--via-api",
+        action="store_true",
+        help="Ensure M1 entities in DB, then stream transactions through the M2 Ingestion API.",
+    )
+    parser.add_argument("--count", type=int, default=120, help="Transaction count when --via-api is set.")
+    parser.add_argument("--api-url", default=None, help="Override M2 Ingestion API URL.")
+    parser.add_argument("--batch-id", default=None, help="Optional batch tag when --via-api is set.")
+    args, _ = parser.parse_known_args()
+
     print("Seeding AegisFlow M1 reference and demo data...")
 
     with psycopg.connect(DSN, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             seed_rules(cur)
             seed_watchlist(cur)
-            seed_demo_ledger(cur)
+            if not args.via_api:
+                seed_demo_ledger(cur)
 
             cur.execute(
                 """
@@ -324,6 +338,24 @@ def main():
                 """
             )
             watchlist_count = cur.fetchone()["n"]
+
+    if args.via_api:
+        import sys
+        from pathlib import Path
+
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from ingest_transactions import main as ingest_main
+
+        api_argv = ["--count", str(args.count)]
+        if args.batch_id:
+            api_argv.extend(["--batch-id", args.batch_id])
+        if args.api_url:
+            api_argv.extend(["--api-url", args.api_url])
+        rc = ingest_main(api_argv)
+        if rc != 0:
+            raise SystemExit(rc)
 
     # The connection context commits on success and rolls back on failure.
     print("Seed complete.")
