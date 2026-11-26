@@ -224,30 +224,32 @@ def test_incident_boundary_single_populated_rejected(isolated_test_db):
 
     conn = isolated_test_db.conn
     now = datetime.now(timezone.utc)
+    incident_start = now - timedelta(hours=1)
+    incident_end = now - timedelta(minutes=30)
 
-    # 1. start populated, end NULL -> rejected
+    # 1. start populated (with explicit labeled_at >= incident_start), end NULL -> rejected
     with conn.cursor() as cur:
         _, acc_id = _seed_account(cur)
         with pytest.raises(CheckViolation) as exc_info:
             cur.execute("""
                 INSERT INTO ground_truth_labels (
                     account_id, label_target, is_fraud, fraud_type, confidence,
-                    incident_start_at, incident_end_at
-                ) VALUES (%s, 'account', true, 'account_takeover', 1.0, %s, NULL)
-            """, (acc_id, now))
+                    incident_start_at, incident_end_at, labeled_at
+                ) VALUES (%s, 'account', true, 'account_takeover', 1.0, %s, NULL, %s)
+            """, (acc_id, incident_start, now))
         conn.rollback()
         assert "ck_ground_truth_incident_paired_boundaries" in str(exc_info.value)
 
-    # 2. start NULL, end populated -> rejected
+    # 2. start NULL, end populated (with explicit labeled_at) -> rejected
     with conn.cursor() as cur:
         _, acc_id = _seed_account(cur)
         with pytest.raises(CheckViolation) as exc_info:
             cur.execute("""
                 INSERT INTO ground_truth_labels (
                     account_id, label_target, is_fraud, fraud_type, confidence,
-                    incident_start_at, incident_end_at
-                ) VALUES (%s, 'account', true, 'account_takeover', 1.0, NULL, %s)
-            """, (acc_id, now))
+                    incident_start_at, incident_end_at, labeled_at
+                ) VALUES (%s, 'account', true, 'account_takeover', 1.0, NULL, %s, %s)
+            """, (acc_id, incident_end, now))
         conn.rollback()
         assert "ck_ground_truth_incident_paired_boundaries" in str(exc_info.value)
 
