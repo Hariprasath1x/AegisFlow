@@ -90,7 +90,7 @@ features-pit:
 > $(if $(wildcard .venv-m2/bin),PATH="$(abspath .venv-m2/bin):$$PATH" )$(M2_DVC) repro features_pit
 
 parity:
-> $(M2_PATH) $(M2_PY) -m pytest -q tests/m2/unit/test_m2_parity.py
+> $(M2_PATH) PARITY_REDIS_URL=$${PARITY_REDIS_URL:-redis://localhost:6380/15} $(M2_PY) -m pytest -q tests/m2/unit/test_m2_parity.py
 
 test-m2:
 > $(M2_PATH) $(M2_PY) -m pytest -q tests/m2/unit tests/m2/api
@@ -101,7 +101,8 @@ test-m2-int:
 verify-m2:
 > $(M2_PATH) $(M2_PY) scripts/verify_m2.py
 
-m2: test-m2 test-m2-int verify-m2
+m2: test-m2 test-m2-int
+> $(M2_PATH) $(M2_PY) scripts/verify_m2.py --skip-tests
 
 .PHONY: up-m2 migrate seed-fraud ingest ingest-stream recover-features graph-once features-pit parity test-m2 test-m2-int verify-m2 m2
 
