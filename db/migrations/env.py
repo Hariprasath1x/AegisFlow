@@ -18,9 +18,26 @@ if config.config_file_name is not None:
 
 # Resolve DATABASE_URL from environment or ingestion.config if not already explicitly set
 if not config.get_main_option("sqlalchemy.url"):
+    DATABASE_URL = ""
     try:
-        from ingestion.config import DATABASE_URL
+        from ingestion.config import DATABASE_URL as _CFG_DATABASE_URL
+
+        DATABASE_URL = _CFG_DATABASE_URL
     except ImportError:
+        env_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../.env")
+        )
+        if os.path.isfile(env_path):
+            with open(env_path, encoding="utf-8") as env_file:
+                for raw_line in env_file:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    key = key.removeprefix("export ").strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key:
+                        os.environ.setdefault(key, value)
         DATABASE_URL = os.getenv(
             "DATABASE_URL",
             "postgresql+psycopg://aegisflow:aegisflow@localhost:5432/aegisflow",

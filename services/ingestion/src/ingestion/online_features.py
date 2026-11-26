@@ -8,12 +8,15 @@ Returns all 19 canonical features defined in aegis_ml.features.definitions.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 from datetime import datetime, timezone
 from decimal import Decimal
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from aegis_ml.features import definitions as D
+from ingestion.locks import AccountLockLostError
 
 # ============================================================================
 # Single Atomic Redis Lua Script for Online Feature Updates
@@ -199,7 +202,26 @@ return {
 }
 """
 
+_FENCED_SCRIPT: str = (
+    "if redis.call('GET', KEYS[11]) ~= ARGV[16] then return {'lock_lost'} end\n"
+    + SCRIPT
+)
+
 _SCRIPT_SHA: str | None = None
+_FENCED_SCRIPT_SHA: str | None = None
+_ACTIVE_FENCE: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "online_features_lock_fence", default=None
+)
+
+
+@contextmanager
+def fenced_by(lock_key: str, lock_token: str) -> Iterator[None]:
+    """Bind atomic Lua lock-token verification to `update()` calls within this context."""
+    tok = _ACTIVE_FENCE.set((lock_key, lock_token))
+    try:
+        yield
+    finally:
+        _ACTIVE_FENCE.reset(tok)
 
 
 def _parse_timestamp(t: Mapping[str, Any]) -> tuple[datetime, float]:
@@ -341,22 +363,44 @@ def read_graph(r, account_id: str) -> dict[str, float]:
     return out
 
 
-def _eval_script(r, keys: list[str], args: list) -> list:
-    """Execute SCRIPT using EVALSHA with automatic SCRIPT LOAD caching and fallback."""
-    global _SCRIPT_SHA
-    if _SCRIPT_SHA is None:
+def _eval_script(
+    r, keys: list[str], args: list, fence: tuple[str, str] | None = None
+) -> list:
+    """Execute SCRIPT (or _FENCED_SCRIPT) using EVALSHA with automatic SCRIPT LOAD fallback."""
+    global _SCRIPT_SHA, _FENCED_SCRIPT_SHA
+    if fence is not None:
+        lock_key, lock_token = fence
+        script = _FENCED_SCRIPT
+        eval_keys = [*keys, lock_key]
+        eval_args = [*args, lock_token]
+        sha = _FENCED_SCRIPT_SHA
+    else:
+        script = SCRIPT
+        eval_keys = keys
+        eval_args = args
+        sha = _SCRIPT_SHA
+
+    if sha is None:
         try:
-            _SCRIPT_SHA = r.script_load(SCRIPT)
+            sha = r.script_load(script)
+            if fence is not None:
+                _FENCED_SCRIPT_SHA = sha
+            else:
+                _SCRIPT_SHA = sha
         except Exception:
-            return r.eval(SCRIPT, len(keys), *keys, *args)
+            return r.eval(script, len(eval_keys), *eval_keys, *eval_args)
     try:
-        return r.evalsha(_SCRIPT_SHA, len(keys), *keys, *args)
+        return r.evalsha(sha, len(eval_keys), *eval_keys, *eval_args)
     except Exception:
         try:
-            _SCRIPT_SHA = r.script_load(SCRIPT)
-            return r.evalsha(_SCRIPT_SHA, len(keys), *keys, *args)
+            sha = r.script_load(script)
+            if fence is not None:
+                _FENCED_SCRIPT_SHA = sha
+            else:
+                _SCRIPT_SHA = sha
+            return r.evalsha(sha, len(eval_keys), *eval_keys, *eval_args)
         except Exception:
-            return r.eval(SCRIPT, len(keys), *keys, *args)
+            return r.eval(script, len(eval_keys), *eval_keys, *eval_args)
 
 
 def update(r, t: dict) -> dict[str, float] | None:
@@ -368,18 +412,24 @@ def update(r, t: dict) -> dict[str, float] | None:
 
     Raises:
         ValueError: If transaction arrives out-of-order or has invalid fields.
+        AccountLockLostError: If an active lock fence is no longer owned by the caller.
     """
     dt_utc, _ = _parse_timestamp(t)
     account_id = _parse_id(t, ("account_id",), required=True)
 
     keys = keys_for(t)
     args = args_for(t)
+    fence = _ACTIVE_FENCE.get()
 
-    res = _eval_script(r, keys, args)
+    res = _eval_script(r, keys, args, fence=fence)
     if not res:
         raise RuntimeError("Redis Lua script returned empty response")
 
     status = res[0].decode("utf-8") if isinstance(res[0], bytes) else str(res[0])
+    if status == "lock_lost":
+        raise AccountLockLostError(
+            f"Lock fence rejected stale Redis feature update for account {account_id}"
+        )
     if status == "dup":
         return None
     if status == "out_of_order":
