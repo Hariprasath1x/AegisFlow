@@ -38,7 +38,13 @@ from .matrix import (
     feature_names,
     load_transactions,
 )
-from .splits import check_no_time_leak, label_delay_mask, time_split
+from .splits import (
+    check_no_time_leak,
+    label_delay_mask,
+    strict_maturity_mask,
+    time_split,
+    training_cutoff,
+)
 
 try:
     from .registry import register_candidate
@@ -81,14 +87,26 @@ def prepare(params: dict[str, Any], df: pd.DataFrame | None = None) -> dict[str,
         params["test_weeks"],
         params["embargo_hours"],
     )
-    df = df[df["split"] != "drop"].reset_index(drop=True)
-    known = label_delay_mask(
+    # Derive training observation cutoff exclusively from training boundary and embargo,
+    # never from the maximum timestamp in a dataframe containing test rows.
+    training_as_of = training_cutoff(
         df["ts"],
-        df["label_reported_at"],
-        as_of=df["ts"].max(),
+        params["train_weeks"],
+        params["embargo_hours"],
+    )
+    mature_mask = strict_maturity_mask(
+        df["ts"],
+        as_of=training_as_of,
         horizon_days=params["label_horizon_days"],
     )
-    df = df[known | (df["split"] == "test")].reset_index(drop=True)
+    # Policy A: Filter training to strict timestamp-mature transactions.
+    # Immature training rows, embargo rows, and M4-reserved rows remain excluded.
+    # Test rows are preserved for evaluation.
+    df = (
+        df[(df["split"] == "test") | ((df["split"] == "train") & mature_mask)]
+        .sort_values("ts")
+        .reset_index(drop=True)
+    )
     train, test = df[df.split == "train"], df[df.split == "test"]
     problems = check_no_time_leak(train["ts"], test["ts"])
     if problems:

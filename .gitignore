@@ -28,6 +28,8 @@ Thumbs.db
 *.onnx
 *.pkl
 *.joblib
+*.db
+mlflow.db
 mlruns/
 mlartifacts/
 

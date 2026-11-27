@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from aegis_ml.features import definitions as D
 from aegis_ml.training.prepare_ieee import (
     CANONICAL_COLUMNS,
     ORIGIN,
@@ -95,14 +96,16 @@ def test_custom_origin_reflected_in_output_and_metadata() -> None:
 
 
 def test_transaction_id_and_amount_conversion() -> None:
-    """4. Correct transaction_id (string) and amount (float) conversion."""
+    """4. Correct transaction_id (string), amount (float), and amount_minor (int64) conversion."""
     df = sample_transactions()
     res = canonicalise(df)
 
-    assert res["transaction_id"].dtype == object
+    assert pd.api.types.is_string_dtype(res["transaction_id"]) or res["transaction_id"].dtype == object
     assert res["transaction_id"].tolist() == ["3000000", "3000001", "3000044", "3000045", "3000099"]
     assert res["amount"].dtype == float
     assert res["amount"].tolist() == [10.50, 20.00, 150.25, 45.00, 1000.00]
+    assert res["amount_minor"].dtype in (np.int64, int)
+    assert res["amount_minor"].tolist() == [1050, 2000, 15025, 4500, 100000]
 
 
 def test_optional_identity_join_and_unknown_fallbacks(tmp_path: pathlib.Path) -> None:
@@ -205,24 +208,26 @@ def test_invalid_transaction_ids_rejected() -> None:
 
 
 def test_fraud_reporting_delay_logic_and_boundaries() -> None:
-    """12, 13, 14. Fraud rows receive deterministic delay in [3, 47] days; legitimate rows get NaT."""
+    """12, 13, 14. Fraud rows receive deterministic delay in [3, 30] days; legitimate rows get NaT."""
     df = sample_transactions()
-    # Add a fraud transaction ending in 44 to explicitly test the maximum 47-day delay
-    fraud_44 = pd.DataFrame(
+    # Add fraud transactions to test boundaries under K=28:
+    # TransactionID 3000028: suffix 28 -> (28 % 28) + 3 = 3 days (minimum boundary)
+    # TransactionID 3000027: suffix 27 -> (27 % 28) + 3 = 30 days (maximum boundary)
+    fraud_boundaries = pd.DataFrame(
         {
-            "TransactionID": [3000144],
-            "TransactionDT": [360000],
-            "TransactionAmt": [250.00],
-            "ProductCD": ["W"],
-            "card1": [1006],
-            "card4": ["visa"],
-            "card6": ["debit"],
-            "addr1": [315],
-            "P_emaildomain": ["gmail.com"],
-            "isFraud": [1],
+            "TransactionID": [3000028, 3000027],
+            "TransactionDT": [360000, 360000],
+            "TransactionAmt": [250.00, 300.00],
+            "ProductCD": ["W", "W"],
+            "card1": [1006, 1007],
+            "card4": ["visa", "mastercard"],
+            "card6": ["debit", "credit"],
+            "addr1": [315, 315],
+            "P_emaildomain": ["gmail.com", "yahoo.com"],
+            "isFraud": [1, 1],
         }
     )
-    df = pd.concat([df, fraud_44], ignore_index=True)
+    df = pd.concat([df, fraud_boundaries], ignore_index=True)
     res = canonicalise(df)
 
     # Legitimate rows: is_fraud == 0 -> label_reported_at must be NaT
@@ -237,26 +242,30 @@ def test_fraud_reporting_delay_logic_and_boundaries() -> None:
 
     delays = (fraud["label_reported_at"] - fraud["ts"]).dt.total_seconds() / 86400
     assert (delays >= 3).all()
-    assert (delays <= 47).all()
+    assert (delays <= 30).all()
     assert delays.min() == 3
-    assert delays.max() == 47
+    assert delays.max() == 30
 
     # Check exact values:
-    # ID 3000001: suffix 1 -> (1 % 45) + 3 = 4 days
+    # ID 3000001: suffix 1 -> (1 % 28) + 3 = 4 days
     row1 = res[res["transaction_id"] == "3000001"].iloc[0]
     assert (row1["label_reported_at"] - row1["ts"]) == pd.Timedelta(days=4)
 
-    # ID 3000045: suffix 45 -> (45 % 45) + 3 = 3 days (minimum boundary)
+    # ID 3000028: suffix 28 -> (28 % 28) + 3 = 3 days (minimum boundary)
+    row28 = res[res["transaction_id"] == "3000028"].iloc[0]
+    assert (row28["label_reported_at"] - row28["ts"]) == pd.Timedelta(days=3)
+
+    # ID 3000027: suffix 27 -> (27 % 28) + 3 = 30 days (maximum boundary)
+    row27 = res[res["transaction_id"] == "3000027"].iloc[0]
+    assert (row27["label_reported_at"] - row27["ts"]) == pd.Timedelta(days=30)
+
+    # ID 3000045: suffix 45 -> (45 % 28) + 3 = 17 + 3 = 20 days
     row45 = res[res["transaction_id"] == "3000045"].iloc[0]
-    assert (row45["label_reported_at"] - row45["ts"]) == pd.Timedelta(days=3)
+    assert (row45["label_reported_at"] - row45["ts"]) == pd.Timedelta(days=20)
 
-    # ID 3000144: suffix 44 -> (44 % 45) + 3 = 47 days (maximum boundary)
-    row44 = res[res["transaction_id"] == "3000144"].iloc[0]
-    assert (row44["label_reported_at"] - row44["ts"]) == pd.Timedelta(days=47)
-
-    # ID 3000099: suffix 99 -> (99 % 45) + 3 = 9 + 3 = 12 days
+    # ID 3000099: suffix 99 -> (99 % 28) + 3 = 15 + 3 = 18 days
     row99 = res[res["transaction_id"] == "3000099"].iloc[0]
-    assert (row99["label_reported_at"] - row99["ts"]) == pd.Timedelta(days=12)
+    assert (row99["label_reported_at"] - row99["ts"]) == pd.Timedelta(days=18)
 
 
 def test_invalid_non_binary_fraud_labels_rejected() -> None:
@@ -283,10 +292,107 @@ def test_parquet_roundtrip_and_schema_fidelity(tmp_path: pathlib.Path) -> None:
     loaded = pd.read_parquet(out_file)
     assert list(loaded.columns) == CANONICAL_COLUMNS
     assert len(loaded) == len(res)
-    assert loaded["transaction_id"].dtype == object
+    assert pd.api.types.is_string_dtype(loaded["transaction_id"]) or loaded["transaction_id"].dtype == object
     assert loaded["amount"].dtype == float
+    assert loaded["amount_minor"].dtype in (np.int64, int)
+    assert loaded["amount_minor"].tolist() == res["amount_minor"].tolist()
     assert loaded["is_fraud"].dtype in (np.int32, np.int64, int)
     assert loaded["ts"].dt.tz is not None
+
+
+def test_amount_minor_two_decimal_matches_definitions_amount_minor() -> None:
+    """17. Standard 2-decimal amounts produce amount_minor matching D.amount_minor() exactly."""
+    df = sample_transactions()
+    res = canonicalise(df)
+
+    for amt_float, amt_minor_val in zip(res["amount"], res["amount_minor"]):
+        expected = D.amount_minor(amt_float)
+        assert amt_minor_val == expected
+
+
+def test_amount_minor_sub_cent_quantization() -> None:
+    """18. Sub-cent amounts are quantized via nearest-cent rule while preserving exact source amounts."""
+    df = sample_transactions()
+    # Replace TransactionAmt with representative IEEE-CIS values
+    df["TransactionAmt"] = [75.887, 16.495, 0.251, 100.50, 32.325]
+    res = canonicalise(df)
+
+    # Original amounts are preserved without rounding or truncation
+    np.testing.assert_array_equal(res["amount"].to_numpy(), np.array([75.887, 16.495, 0.251, 100.50, 32.325]))
+
+    # Quantized integer minor units (cents)
+    # 75.887 * 100 = 7588.7 -> 7589
+    # 16.495 * 100 = 1649.5 -> 1650
+    # 0.251 * 100 = 25.1 -> 25
+    # 100.50 * 100 = 10050.0 -> 10050
+    # 32.325 * 100 = 3232.5000000000005 (float64 binary) -> 3233
+    expected_minor = [7589, 1650, 25, 10050, 3233]
+    assert res["amount_minor"].tolist() == expected_minor
+    assert res["amount_minor"].dtype == np.int64
+
+
+def test_invalid_and_non_finite_amounts_fail_closed() -> None:
+    """19. Non-finite, null, NaN, zero, negative, and overflow amounts fail closed with ValueError."""
+    # 1. Null / None
+    df_null = sample_transactions()
+    df_null.loc[0, "TransactionAmt"] = None
+    with pytest.raises(ValueError, match="TransactionAmt contains missing/null"):
+        canonicalise(df_null)
+
+    # 2. NaN
+    df_nan = sample_transactions()
+    df_nan.loc[0, "TransactionAmt"] = np.nan
+    with pytest.raises(ValueError, match="TransactionAmt contains missing/null"):
+        canonicalise(df_nan)
+
+    # 3. Non-numeric string
+    df_str = sample_transactions()
+    df_str["TransactionAmt"] = df_str["TransactionAmt"].astype(object)
+    df_str.loc[0, "TransactionAmt"] = "invalid_money"
+    with pytest.raises(ValueError, match="TransactionAmt contains non-numeric values"):
+        canonicalise(df_str)
+
+    # 4. Zero amount
+    df_zero = sample_transactions()
+    df_zero.loc[0, "TransactionAmt"] = 0.0
+    with pytest.raises(ValueError, match="TransactionAmt contains non-positive values"):
+        canonicalise(df_zero)
+
+    # 5. Negative amount
+    df_neg = sample_transactions()
+    df_neg.loc[0, "TransactionAmt"] = -15.50
+    with pytest.raises(ValueError, match="TransactionAmt contains non-positive values"):
+        canonicalise(df_neg)
+
+    # 6. Positive infinity
+    df_inf = sample_transactions()
+    df_inf.loc[0, "TransactionAmt"] = float("inf")
+    with pytest.raises(ValueError, match="TransactionAmt contains non-finite/infinite values"):
+        canonicalise(df_inf)
+
+    # 7. Negative infinity
+    df_ninf = sample_transactions()
+    df_ninf.loc[0, "TransactionAmt"] = float("-inf")
+    with pytest.raises(ValueError, match="TransactionAmt contains non-finite/infinite values"):
+        canonicalise(df_ninf)
+
+    # 8. Overflow beyond 64-bit signed integer
+    df_overflow = sample_transactions()
+    df_overflow.loc[0, "TransactionAmt"] = 1e19
+    with pytest.raises(ValueError, match="exceed 64-bit integer minor unit"):
+        canonicalise(df_overflow)
+
+    # 9. Value scaling to exactly 2**63
+    df_exact_2_63 = sample_transactions()
+    df_exact_2_63.loc[0, "TransactionAmt"] = float(2**63) / 100.0
+    with pytest.raises(ValueError, match="exceed 64-bit integer minor unit"):
+        canonicalise(df_exact_2_63)
+
+    # 10. Value rounding up to 2**63
+    df_round_to_2_63 = sample_transactions()
+    df_round_to_2_63.loc[0, "TransactionAmt"] = (float(2**63) - 0.49) / 100.0
+    with pytest.raises(ValueError, match="exceed 64-bit integer minor unit"):
+        canonicalise(df_round_to_2_63)
 
 
 def test_metadata_values_match_generated_output(tmp_path: pathlib.Path) -> None:

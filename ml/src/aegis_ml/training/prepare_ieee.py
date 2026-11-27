@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import numpy as np
 import pandas as pd
 
 ORIGIN = "2017-12-01"
@@ -44,6 +45,7 @@ CANONICAL_COLUMNS = [
     "transaction_id",
     "ts",
     "amount",
+    "amount_minor",
     "channel",
     "account_id",
     "card_network",
@@ -131,12 +133,33 @@ def canonicalise(df: pd.DataFrame, origin: str = ORIGIN) -> pd.DataFrame:
         )
 
     # Validate TransactionAmt
+    if df["TransactionAmt"].isna().any():
+        raise ValueError("TransactionAmt contains missing/null values")
     try:
         amt = pd.to_numeric(df["TransactionAmt"], errors="raise").astype(float)
     except Exception as e:
         raise ValueError(f"TransactionAmt contains non-numeric values: {e}") from e
+
     if amt.isna().any():
         raise ValueError("TransactionAmt contains missing/null values")
+    if np.isinf(amt).any():
+        raise ValueError("TransactionAmt contains non-finite/infinite values")
+    if (amt <= 0.0).any():
+        raise ValueError("TransactionAmt contains non-positive values (must be strictly positive)")
+
+    # Scale to minor currency units (cents)
+    scaled = amt * 100.0
+    if np.isinf(scaled).any():
+        raise ValueError("TransactionAmt values cause overflow when scaled to minor units")
+
+    # M3 Nearest-cent quantization (USD cents as integer minor units)
+    rounded_minor = scaled.round()
+    if np.isinf(rounded_minor).any() or (rounded_minor >= 2**63).any():
+        raise ValueError("TransactionAmt values exceed 64-bit integer minor unit representation")
+    if (rounded_minor <= 0.0).any():
+        raise ValueError("Positive transaction amount quantized to non-positive minor units")
+
+    amount_minor = rounded_minor.astype("int64")
 
     ts = orig_ts + pd.to_timedelta(dt_sec, unit="s")
     is_fraud = df["isFraud"].astype(int)
@@ -146,6 +169,7 @@ def canonicalise(df: pd.DataFrame, origin: str = ORIGIN) -> pd.DataFrame:
             "transaction_id": tx_id_str,
             "ts": ts,
             "amount": amt,
+            "amount_minor": amount_minor,
             "channel": df["ProductCD"].fillna("unknown").astype(str),
             "account_id": df["card1"].fillna("unknown").astype(str),
             "card_network": df.get("card4", pd.Series(index=df.index, dtype=object))
@@ -171,8 +195,11 @@ def canonicalise(df: pd.DataFrame, origin: str = ORIGIN) -> pd.DataFrame:
     )
 
     # Chargebacks are not instant: give every labelled fraud a realistic reporting
-    # delay so label_delay_mask has something honest to work with.
-    delay = pd.to_timedelta((suffixes.astype(int) % 45) + 3, unit="D")
+    # delay so label maturity filtering has something honest to work with.
+    # Synthetic delay policy: (suffix % 28) + 3 days (bounds 3-30 days inclusive).
+    # This is a benchmark simulation policy aligned to the 30-day maturity horizon,
+    # ensuring all mature fraud chargebacks land within 30 days without truncation.
+    delay = pd.to_timedelta((suffixes.astype(int) % 28) + 3, unit="D")
     out["label_reported_at"] = out["ts"] + delay.where(out["is_fraud"] == 1)
 
     return out[CANONICAL_COLUMNS].sort_values(["ts", "transaction_id"]).reset_index(drop=True)

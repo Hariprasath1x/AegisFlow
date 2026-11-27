@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-TRAIN_WEEKS = 6
+TRAIN_WEEKS = 12
 TEST_WEEKS = 2
 
 
@@ -96,10 +96,57 @@ def check_no_time_leak(train_ts, test_ts) -> list[str]:
     return problems
 
 
-def label_delay_mask(ts, reported_at, as_of, horizon_days: int = 30) -> np.ndarray:
-    """Which rows had a KNOWN label at `as_of`. Chargebacks arrive weeks late, so a
-    model 'evaluated' on labels that did not exist yet is reading the future. Rows
-    whose label had not landed are excluded from training, not silently marked legit."""
+def training_cutoff(
+    ts: pd.Series,
+    train_weeks: int = TRAIN_WEEKS,
+    embargo_hours: int = 24,
+) -> pd.Timestamp:
+    """Derive the training observation cutoff (cut - embargo_hours) from timestamps."""
+    if len(ts) == 0:
+        raise ValueError("Cannot derive training cutoff from empty timestamps")
+    ts_dt = pd.to_datetime(ts, utc=True)
+    cut = ts_dt.min() + pd.Timedelta(weeks=train_weeks)
+    return cut - pd.Timedelta(hours=embargo_hours)
+
+
+def strict_maturity_mask(
+    ts,
+    as_of,
+    horizon_days: int = 30,
+) -> np.ndarray:
+    """Policy A - Strict timestamp-based label maturity mask.
+
+    A transaction is eligible for training if and only if:
+        transaction_ts <= as_of_ts - pd.Timedelta(days=horizon_days)
+
+    This timestamp-only eligibility rule applies identically to fraud and legitimate
+    transactions. Early chargeback arrival does not admit immature transactions.
+    """
+    if horizon_days < 0:
+        raise ValueError(f"horizon_days must be non-negative, got {horizon_days}")
+
+    ts_s = pd.Series(ts) if not isinstance(ts, pd.Series) else ts
+    if len(ts_s) == 0:
+        return np.array([], dtype=bool)
+
+    ts_dt = pd.to_datetime(ts_s, utc=True)
+    as_of_ts = _normalize_as_of(as_of)
+    maturity_boundary = as_of_ts - pd.Timedelta(days=horizon_days)
+
+    return (ts_dt <= maturity_boundary).to_numpy()
+
+
+def label_delay_mask(
+    ts,
+    reported_at,
+    as_of,
+    horizon_days: int = 30,
+) -> np.ndarray:
+    """Policy A strict maturity mask across transactions.
+
+    Validates inputs and enforces strict timestamp maturity (transaction_ts <= as_of - horizon_days).
+    Early chargeback arrival does not grant admission into the mature training population.
+    """
     if horizon_days < 0:
         raise ValueError(f"horizon_days must be non-negative, got {horizon_days}")
 
@@ -112,16 +159,4 @@ def label_delay_mask(ts, reported_at, as_of, horizon_days: int = 30) -> np.ndarr
     if len(ts_s) == 0:
         return np.array([], dtype=bool)
 
-    rep_s = pd.Series(rep_s.to_numpy(), index=ts_s.index)
-    ts_dt = pd.to_datetime(ts_s, utc=True)
-    rep_dt = pd.to_datetime(rep_s, utc=True)
-    as_of_ts = _normalize_as_of(as_of)
-
-    # Legitimate transactions (no chargeback) mature once horizon_days have elapsed without dispute.
-    matured = rep_dt.isna() & (ts_dt <= as_of_ts - pd.Timedelta(days=horizon_days))
-
-    # Fraud transactions are known if and only if the chargeback has landed on or before as_of.
-    # If a chargeback is pending/unlanded (rep_dt > as_of_ts), it is excluded rather than treated as mature clean.
-    known = rep_dt.notna() & (rep_dt <= as_of_ts)
-
-    return (matured | known).to_numpy()
+    return strict_maturity_mask(ts_s, as_of=as_of, horizon_days=horizon_days)

@@ -1,7 +1,7 @@
 # Append the fraud block to the M2 params.yaml.
 fraud:
   seed: 42
-  train_weeks: 6 # spec section 14: train weeks 1-6, test 7-8
+  train_weeks: 12 # Design B: 12-week training region (53d mature, 30d immature, 24h embargo)
   test_weeks: 2
   embargo_hours: 24 # drop the rows straddling the cut (shared windows)
   label_horizon_days: 30 # chargebacks arrive late; unmatured labels are excluded

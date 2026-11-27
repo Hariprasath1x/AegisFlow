@@ -54,9 +54,9 @@ def test_params_yaml_fraud_configuration() -> None:
     assert "fraud" in config, "'fraud' root key missing from params.yaml"
     fraud = config["fraud"]
 
-    # Global fraud parameters
+    # Global fraud parameters (Design B: 12-week training region)
     assert fraud["seed"] == 42
-    assert fraud["train_weeks"] == 6
+    assert fraud["train_weeks"] == 12
     assert fraud["test_weeks"] == 2
     assert fraud["embargo_hours"] == 24
     assert fraud["label_horizon_days"] == 30, "label_horizon_days must be 30"

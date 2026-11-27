@@ -137,7 +137,6 @@ def test_missing_typologies_partial():
     # Overall should only average the non-None rates
     assert res["overall"]["rate"] == 1.0
 
-
 def test_type_conversion_string_ids():
     # Integer transaction IDs matched against string flagged IDs
     df = pd.DataFrame(
@@ -323,3 +322,29 @@ def test_ci_workflow_retrain_validity():
     assert "Champion/challenger comparison (report only, never promotes)" in step_names
     pull_step = next(s for s in steps if s.get("name") == "Pull data")
     assert "localstore" in pull_step["run"]
+
+
+def test_graph_and_deterministic_detectors(tmp_path):
+    from aegis_ml.evaluation.typology_eval import (
+        detect_smurfing,
+        detect_layering,
+        detect_round_tripping,
+        detect_typologies,
+    )
+    tx, ep = generate_typology_datasets(out_dir=tmp_path, seed=42, episodes_per_typology=5, background_txns=50)
+    flagged_s = detect_smurfing(tx)
+    flagged_l = detect_layering(tx)
+    flagged_r = detect_round_tripping(tx)
+    flagged_all = detect_typologies(tx)
+
+    assert len(flagged_s) > 0
+    assert len(flagged_l) > 0
+    assert len(flagged_r) > 0
+    assert flagged_all == (flagged_s | flagged_l | flagged_r)
+
+    # Evaluate detection on generated episodes
+    res = episode_detection(ep, flagged_all)
+    assert res["smurfing"]["rate"] == 1.0
+    assert res["layering"]["rate"] == 1.0
+    assert res["round_tripping"]["rate"] == 1.0
+    assert res["overall"]["rate"] == 1.0

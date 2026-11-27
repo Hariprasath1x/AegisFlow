@@ -12,7 +12,7 @@
 | Evaluation Data | IEEE-CIS weeks 7–8 (strictly out-of-time test split) |
 | Objective Primary Metric | `recall_at_1pct_fpr` (minimum relative improvement threshold: >= 2.0%) |
 | Calibration | Isotonic regression with ECE <= 0.05 on held-out calibration partition |
-| Features | 28 canonical features declared in `aegis_ml.features.definitions` |
+| Features | 28 ordered model inputs (19 M2 canonical features, 6 train-fitted frequency-encoded categoricals, 2 raw amount transforms, 1 graph feature) |
 
 ## Intended Use
 
@@ -28,6 +28,8 @@ Any decision about a customer beyond the specific transaction. The model score i
 
 - Trained primarily on card-present and card-not-present retail payment patterns.
 - High-velocity wire and wallet channels have distinct distributions and are monitored with cohort-specific recall reporting.
+- **Currency & Dataset Semantics:** IEEE-CIS training amounts represent USD (`float64`). The original unrounded source amount is retained in `amount` and supplies the model's `amount` and `log_amount` inputs. For compatibility with M2 canonical feature calculations (`amount_sum_minor_*`, `amount_zscore`), `amount_minor` is generated in M3 dataset preparation via nearest-cent quantization (`(TransactionAmt * 100.0).round().astype("int64")`). Downstream integer minor units represent USD cents.
+- **Production Deployment Boundary:** The model is an M3 supervised fraud benchmark. AegisFlow's production ingestion pipeline (`services/ingestion/`) processes domestic INR transactions represented in integer paise. Direct deployment against the production INR stream is not established by this training work and requires an approved M4 compatibility strategy (such as domestic INR retraining or a formal currency-normalization architecture).
 
 ---
 

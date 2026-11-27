@@ -799,3 +799,58 @@ def test_build_conflicting_mapping_and_fit_df_raises() -> None:
     _, dummy_mapping = encode_categoricals(df)
     with pytest.raises(ValueError, match="Cannot supply both mapping and fit_df"):
         build(df, mapping=dummy_mapping, fit_df=df.iloc[:2])
+
+
+def test_build_matrix_with_sub_cent_prepared_transactions() -> None:
+    """28. Regression test: prepared IEEE-CIS transactions with sub-cent source amounts
+    and integer amount_minor pass cleanly through build() without raising fractional
+    minor units exception, producing exact 28 columns in authoritative order, preserving
+    source amounts in base features, and computing canonical amount_zscore from amount_minor.
+    """
+    df = pd.DataFrame(
+        {
+            "transaction_id": ["TX201", "TX202", "TX203", "TX204"],
+            "account_id": ["ACC_IEEE", "ACC_IEEE", "ACC_IEEE", "ACC_IEEE"],
+            "ts": pd.to_datetime(
+                [
+                    "2026-03-01 10:00:00+00:00",
+                    "2026-03-01 10:30:00+00:00",
+                    "2026-03-01 11:00:00+00:00",
+                    "2026-03-01 12:00:00+00:00",
+                ],
+                utc=True,
+            ),
+            # Representative IEEE-CIS sub-cent source amounts
+            "amount": [75.887, 16.495, 42.294, 3.595],
+            # Corresponding quantized integer cents
+            "amount_minor": [7589, 1650, 4229, 360],
+            "channel": ["web", "app", "web", "pos"],
+            "card_network": ["visa", "mc", "visa", "amex"],
+            "card_type": ["debit", "credit", "debit", "credit"],
+            "device_type": ["mobile", "desktop", "mobile", "tablet"],
+            "email_domain": ["gmail.com", "yahoo.com", "gmail.com", "hotmail.com"],
+            "region": ["US", "US", "CA", "GB"],
+            "device_id": ["DEV_1", "DEV_2", "DEV_1", "DEV_3"],
+            "ip_address": ["10.0.0.1", "10.0.0.2", "10.0.0.1", "10.0.0.3"],
+            "is_fraud": [0, 0, 0, 0],
+            "label_reported_at": [pd.NaT, pd.NaT, pd.NaT, pd.NaT],
+        }
+    )
+
+    X, _ = build(df)
+
+    # 1. Confirms no fractional minor units exception occurs and matrix has exact 28 columns
+    assert list(X.columns) == feature_names()
+    assert len(X) == 4
+
+    # 2. Confirms base features use the original unrounded source amount
+    np.testing.assert_array_equal(X["amount"].to_numpy(), np.array([75.887, 16.495, 42.294, 3.595]))
+    np.testing.assert_allclose(X["log_amount"].to_numpy(), np.log1p(np.array([75.887, 16.495, 42.294, 3.595])))
+
+    # 3. Confirms canonical amount_zscore is produced through existing M2 implementation (Welford on amount_minor)
+    assert not X["amount_zscore"].isna().any()
+    assert X.iloc[0]["amount_zscore"] == 0.0
+    assert X.iloc[1]["amount_zscore"] == 0.0
+    # Mean of [7589, 1650] = 4619.5, std = 4199.505923320668
+    expected_zscore_2 = (4229.0 - 4619.5) / 4199.505923320668
+    assert np.isclose(X.iloc[2]["amount_zscore"], expected_zscore_2, rtol=1e-5)

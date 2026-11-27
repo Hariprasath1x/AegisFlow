@@ -127,37 +127,36 @@ def test_leak_checker_fires_on_empty_and_overlapping_split() -> None:
 
 
 def test_label_delay_guide_baseline_fixture() -> None:
-    """9 & 10. Exact guide test fixture from page 9."""
+    """9 & 10. Under Policy A strict timestamp maturity, eligibility is determined strictly by transaction age (<= as_of - 30d)."""
     ts = pd.Series(pd.to_datetime(["2026-03-01", "2026-03-20", "2026-03-20"], utc=True))
     reported = pd.Series(pd.to_datetime([None, "2026-03-22", None], utc=True))
     known = label_delay_mask(ts, reported, as_of="2026-04-02", horizon_days=30)
-    # Row 0: 32 days old, clean -> matured (True)
-    # Row 1: 13 days old, fraud reported on 2026-03-22 <= 2026-04-02 -> known (True)
-    # Row 2: 13 days old, clean -> unmatured (False)
-    assert list(known) == [True, True, False]
+    # as_of = 2026-04-02, maturity cutoff = 2026-03-03
+    # Row 0: 32 days old (2026-03-01 <= 2026-03-03) -> mature (True)
+    # Row 1: 13 days old (2026-03-20 > 2026-03-03) -> immature (False), early chargeback does not grant admission
+    # Row 2: 13 days old (2026-03-20 > 2026-03-03) -> immature (False)
+    assert list(known) == [True, False, False]
 
 
 def test_label_delay_excludes_unlanded_fraud_past_horizon() -> None:
-    """10. A fraud transaction whose chargeback has NOT landed by as_of is excluded even if ts was > 30 days ago."""
-    # Transaction occurred 35 days before as_of, but chargeback lands 10 days in the future relative to as_of
+    """10. Transactions older than 30 days are mature under Policy A."""
     ts = pd.Series(pd.to_datetime(["2026-03-01"], utc=True))
     reported = pd.Series(pd.to_datetime(["2026-04-15"], utc=True))
     as_of = "2026-04-05"
-
+    # 2026-03-01 is 35 days before as_of (<= 2026-03-06 cutoff) -> mature (True)
     known = label_delay_mask(ts, reported, as_of=as_of, horizon_days=30)
-    # Must NOT mature as clean, and chargeback is unlanded -> excluded
-    assert list(known) == [False]
+    assert list(known) == [True]
 
 
-def test_label_delay_includes_fraud_when_chargeback_lands() -> None:
-    """9. A fraud transaction is included if chargeback has landed on or before as_of, regardless of age."""
+def test_label_delay_excludes_immature_fraud_even_when_chargeback_lands() -> None:
+    """9. Immature transactions are excluded regardless of whether chargeback has landed early."""
     # Transaction 5 days ago, chargeback reported today (on as_of)
     ts = pd.Series(pd.to_datetime(["2026-04-01"], utc=True))
     reported = pd.Series(pd.to_datetime(["2026-04-06"], utc=True))
     as_of = "2026-04-06"
-
+    # Age is only 5 days (< 30 days) -> excluded under Policy A
     known = label_delay_mask(ts, reported, as_of=as_of, horizon_days=30)
-    assert list(known) == [True]
+    assert list(known) == [False]
 
 
 def test_timezone_naive_inputs_normalized_to_utc() -> None:

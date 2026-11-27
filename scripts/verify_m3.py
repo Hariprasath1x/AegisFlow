@@ -147,6 +147,16 @@ def main() -> int:
             else:
                 record("feature order persisted with model", "FAIL")
 
+            if "best_threshold" in champ:
+                record("cost-optimal threshold calculated", "PASS", f"({champ['best_threshold']:.3f})")
+            else:
+                record("cost-optimal threshold calculated", "FAIL")
+
+            if "cohorts" in champ:
+                record("cohort breakdown recorded", "PASS")
+            else:
+                record("cohort breakdown recorded", "FAIL")
+
             if "disparate_impact" in meta:
                 record("disparate-impact screen recorded", "PASS")
             else:
