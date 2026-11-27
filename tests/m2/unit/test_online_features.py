@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 import sys
 from typing import Generator
+from unittest.mock import MagicMock, patch
+from urllib.parse import urlparse
 import pytest
 import redis
 import fakeredis
@@ -32,18 +34,47 @@ from aegis_ml.features import definitions as D
 import ingestion.online_features as OF
 
 
+def validate_scratch_redis_url(url: str) -> int:
+    """Validate an explicit non-zero scratch Redis database URL (rejects db 0)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("redis", "rediss"):
+        raise ValueError(f"Invalid Redis URL scheme: {url!r}. Must start with redis:// or rediss://")
+    path = parsed.path.strip("/")
+    if not path:
+        raise ValueError(f"Scratch Redis URL must specify a database index > 0. Got: {url!r}")
+    try:
+        db_index = int(path)
+    except ValueError as exc:
+        raise ValueError(f"Scratch Redis URL database index must be an integer, got: {path!r}") from exc
+    if db_index <= 0:
+        raise ValueError(
+            f"Scratch Redis URL must use an isolated database (db > 0); db={db_index} is forbidden."
+        )
+    return db_index
+
+
+def create_test_redis_client(scratch_url: str | None = None) -> redis.Redis | fakeredis.FakeRedis:
+    """Create an isolated Redis client for unit tests (FakeRedis by default).
+
+    Never reads operational ``REDIS_URL`` so exported shell env vars cannot cause
+    unit tests to connect to or flush operational Redis DB 0.
+    """
+    if not scratch_url:
+        return fakeredis.FakeRedis()
+
+    db_index = validate_scratch_redis_url(scratch_url)
+    client = redis.Redis.from_url(scratch_url, decode_responses=False)
+    client.ping()
+    conn_db = client.get_connection_kwargs().get("db", 0)
+    if conn_db <= 0 or conn_db != db_index:
+        raise ValueError(f"Connected to unexpected Redis DB {conn_db}; expected scratch DB {db_index}.")
+    return client
+
+
 @pytest.fixture
 def redis_client() -> Generator[redis.Redis | fakeredis.FakeRedis, None, None]:
-    """Provide clean Redis client (real Redis if running on REDIS_URL, else FakeRedis)."""
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    client: redis.Redis | fakeredis.FakeRedis
-    try:
-        real_client = redis.Redis.from_url(redis_url, decode_responses=False)
-        real_client.ping()
-        client = real_client
-    except Exception:
-        client = fakeredis.FakeRedis()
-
+    """Provide an isolated Redis client (FakeRedis by default, or explicit scratch DB > 0)."""
+    client = create_test_redis_client(os.getenv("ONLINE_FEATURES_TEST_REDIS_URL"))
     client.flushdb()
     try:
         yield client
@@ -751,5 +782,56 @@ def test_canonical_feature_output_contract(redis_client):
     for name, val in res.items():
         assert isinstance(val, float), f"Feature {name} value {val!r} must be float"
         assert math.isfinite(val), f"Feature {name} value {val!r} must be finite"
+
+
+def test_default_fixture_uses_fakeredis_and_ignores_operational_redis_url(monkeypatch):
+    """Exporting operational REDIS_URL must never cause unit tests to connect to or flush DB 0."""
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6380/0")
+    monkeypatch.delenv("ONLINE_FEATURES_TEST_REDIS_URL", raising=False)
+
+    with patch("tests.m2.unit.test_online_features.redis.Redis.from_url") as mock_from_url:
+        client = create_test_redis_client(os.getenv("ONLINE_FEATURES_TEST_REDIS_URL"))
+
+    mock_from_url.assert_not_called()
+    assert isinstance(client, fakeredis.FakeRedis)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "redis://localhost:6380/0",
+        "redis://localhost:6380",
+        "redis://localhost:6380/",
+        "redis://localhost:6380/scratch",
+        "redis://localhost:6380/-1",
+        "http://localhost:6380/15",
+    ],
+)
+def test_scratch_redis_url_rejects_db_zero_and_malformed_urls(bad_url: str):
+    """Explicit scratch Redis URLs targeting DB 0 or invalid formats are rejected before connecting."""
+    with patch("tests.m2.unit.test_online_features.redis.Redis.from_url") as mock_from_url:
+        with pytest.raises(ValueError):
+            create_test_redis_client(bad_url)
+
+    mock_from_url.assert_not_called()
+
+
+def test_scratch_redis_url_valid_db_connects_and_never_calls_flushall(monkeypatch):
+    """Valid scratch DB > 0 connects cleanly and fixture flushes only that scratch DB."""
+    mock_client = MagicMock()
+    mock_client.ping.return_value = True
+    mock_client.get_connection_kwargs.return_value = {"db": 15}
+    monkeypatch.setenv("ONLINE_FEATURES_TEST_REDIS_URL", "redis://localhost:6380/15")
+
+    with patch(
+        "tests.m2.unit.test_online_features.redis.Redis.from_url",
+        return_value=mock_client,
+    ) as mock_from_url:
+        client = create_test_redis_client(os.getenv("ONLINE_FEATURES_TEST_REDIS_URL"))
+        client.flushdb()
+
+    mock_from_url.assert_called_once_with("redis://localhost:6380/15", decode_responses=False)
+    mock_client.flushdb.assert_called_once()
+    mock_client.flushall.assert_not_called()
 
 
